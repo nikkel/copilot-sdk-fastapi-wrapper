@@ -33,30 +33,25 @@ gh auth login
 
 Follow the interactive prompts. Choose **GitHub.com** → **HTTPS** → authenticate via browser.
 
-### 3 — Install the Copilot CLI extension
-
-```bash
-gh extension install github/gh-copilot
-```
-
-Verify it works:
-
-```bash
-gh copilot --version
-```
-
-### 4 — Install Python dependencies
+### 3 — Install Python dependencies
 
 Requires **Python 3.11+**.
+
+`github-copilot-sdk` 1.x downloads the Copilot CLI runtime it needs on first start (cached in
+`~/Library/Caches/github-copilot-sdk/` on macOS), so the old `gh-copilot` extension is no longer required.
 
 ```bash
 pip install -r requirements.txt
 ```
 
 `requirements.txt` installs:
-- `github-copilot-sdk` — Python SDK that communicates with the Copilot CLI
-- `fastapi` — web framework
-- `uvicorn` — ASGI server
+- `github-copilot-sdk` 1.x (≥ 1.0.22) — Python SDK that runs and talks to the Copilot CLI runtime
+- `fastapi` (≥ 0.143.2) — web framework
+- `uvicorn[standard]` (≥ 0.54.0) — ASGI server
+- `pydantic` (≥ 2.14.1) — request/response models
+
+Sessions are **answer-only**: Copilot's built-in tools (shell, file edits, …) are disabled and every
+permission request is refused, so prompts containing untrusted text can't make it act on your machine.
 
 ---
 
@@ -340,7 +335,7 @@ while (true) {
 | Error | Fix |
 |---|---|
 | `gh: command not found` | Install GitHub CLI: `brew install gh` |
-| `gh copilot: command not found` | Run `gh extension install github/gh-copilot` |
+| First start is slow | The SDK is downloading the Copilot CLI runtime once; later starts use the cache |
 | `503 Copilot client not ready` | The server is still starting up — wait a moment and retry |
 | `ModuleNotFoundError: No module named 'copilot'` | Run `pip install -r requirements.txt` |
 | Server starts but returns errors | Make sure `gh auth login` has been completed and your account has an active Copilot subscription |

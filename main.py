@@ -4,9 +4,9 @@ FastAPI wrapper around the github-copilot-sdk.
 Prerequisites:
   1. Install GitHub CLI:     brew install gh
   2. Authenticate:           gh auth login
-  3. Install Copilot CLI:    gh extension install github/gh-copilot
-  4. Install dependencies:   pip install -r requirements.txt
-  5. Run the server:         uvicorn main:app --reload
+  3. Install dependencies:   pip install -r requirements.txt
+     (github-copilot-sdk 1.x downloads the Copilot CLI runtime itself on first start)
+  4. Run the server:         uvicorn main:app --reload
 """
 
 import asyncio
@@ -18,7 +18,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from copilot import CopilotClient
-from copilot.session import PermissionRequestResult
+from copilot.generated.rpc import PermissionDecisionReject
 
 
 # ---------------------------------------------------------------------------
@@ -64,13 +64,13 @@ app = FastAPI(
 # Helper
 # ---------------------------------------------------------------------------
 
-def deny_all(request, invocation) -> PermissionRequestResult:
+def deny_all(request, invocation) -> PermissionDecisionReject:
     """Refuse every permission request (shell, file writes, URLs, ...).
 
     The API only answers prompts. Prompts may contain untrusted text (e.g. web pages from a browsing agent),
     so the session must never be able to act on this machine.
     """
-    return PermissionRequestResult(kind="denied-by-rules")
+    return PermissionDecisionReject(feedback="This API only answers prompts; no actions are allowed.")
 
 
 # Answer-only sessions: no built-in Copilot CLI tools (shell, file edits, ...) and every permission denied.
