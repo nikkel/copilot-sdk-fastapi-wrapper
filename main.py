@@ -19,6 +19,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from copilot import CopilotClient
+from copilot.tools import Tool, ToolInvocation, ToolResult
 from copilot.generated.rpc import PermissionDecisionReject
 
 
@@ -37,6 +38,31 @@ class PromptRequest(BaseModel):
 
 class ChatResponse(BaseModel):
     response: str
+    model: str
+
+
+class ToolSpec(BaseModel):
+    """A tool the CALLER implements (OpenAI/Ollama function format: {"type": "function", "function": {...}})."""
+    type: str = "function"
+    function: dict
+
+
+class AgentStepRequest(BaseModel):
+    prompt: str
+    system: str | None = None
+    tools: list[ToolSpec] = []
+    model: str = "gpt-6-luna"
+    reasoning_effort: str | None = None
+
+
+class ToolCall(BaseModel):
+    name: str
+    arguments: dict
+
+
+class AgentStepResponse(BaseModel):
+    content: str
+    tool_calls: list[ToolCall]
     model: str
 
 
@@ -161,6 +187,67 @@ async def _stream_prompt(
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
+
+def _capturing_tools(specs: list[ToolSpec], calls: list[ToolCall]) -> list[Tool]:
+    """The caller's tools, registered natively so the model uses real function calling. The handler only
+    RECORDS the call (nothing runs here) and the tool is terminal, so the turn ends and the caller executes it."""
+
+    def capture(invocation: ToolInvocation) -> ToolResult:
+        args = invocation.arguments if isinstance(invocation.arguments, dict) else {}
+        calls.append(ToolCall(name=invocation.tool_name, arguments=args))
+        return ToolResult(text_result_for_llm="Handed to the app, which runs it and reports back.")
+
+    tools = []
+    for spec in specs:
+        fn = spec.function
+        tools.append(Tool(name=fn["name"], description=fn.get("description", ""), handler=capture,
+                          parameters=fn.get("parameters") or {"type": "object", "properties": {}},
+                          skip_permission=True, is_terminal=True,
+                          overrides_built_in_tool=True))  # e.g. web_fetch: the caller's version wins
+    return tools
+
+
+async def _agent_step(req: AgentStepRequest) -> AgentStepResponse:
+    """One decision of an agent whose tools run elsewhere: returns the model's text and/or its tool calls."""
+    if copilot_client is None:
+        raise HTTPException(status_code=503, detail="Copilot client not ready")
+    calls: list[ToolCall] = []
+    tools = _capturing_tools(req.tools, calls)
+    session_kwargs = _session_kwargs(req.model, req.reasoning_effort, req.system, tools=tools)
+    session_kwargs["available_tools"] = [t.name for t in tools]  # only the caller's tools, no built-ins
+    reply_parts: list[str] = []
+    errors: list[str] = []
+    done = asyncio.Event()
+
+    async with await copilot_client.create_session(**session_kwargs) as session:
+
+        def on_event(event) -> None:
+            match event.type.value:
+                case "assistant.message":
+                    reply_parts.append(event.data.content or "")
+                case "session.error":
+                    errors.append(getattr(event.data, "message", "") or "unknown error")
+                case "session.idle":
+                    done.set()
+
+        session.on(on_event)
+        await session.send(req.prompt)
+        await done.wait()
+
+    if errors and not calls and not "".join(reply_parts).strip():
+        raise HTTPException(status_code=502, detail=f"Copilot: {errors[-1]}")
+    return AgentStepResponse(content="".join(reply_parts).strip(), tool_calls=calls, model=req.model)
+
+
+@app.post("/agent/step", response_model=AgentStepResponse, summary="One step of an agent (native tool calling)")
+async def agent_step(req: AgentStepRequest) -> AgentStepResponse:
+    """
+    Send a system prompt, the conversation so far and the tools YOUR app implements. The model either calls
+    tools (returned in `tool_calls`, never executed here) or answers in `content`. Run the tools yourself and
+    send the next step with their results in the prompt.
+    """
+    return await _agent_step(req)
+
 
 @app.post("/chat", response_model=ChatResponse, summary="Send a prompt (blocking)")
 async def chat(req: PromptRequest) -> ChatResponse:

@@ -139,6 +139,26 @@ Same request body as `/chat`.
 
 ---
 
+### `POST /agent/step` — One step of an agent (native tool calling)
+
+For apps that implement their own tools (e.g. a browser agent). The tools are registered with Copilot as real
+functions, so the model uses native tool calling; **nothing is executed here**: each call is recorded, the turn
+ends, and the calls are returned for your app to run. Send the results back in the next step's `prompt`.
+
+```json
+{
+  "system": "You operate a web browser…",
+  "prompt": "User: find the phone number of …",
+  "tools": [{"type": "function", "function": {"name": "search", "description": "…", "parameters": {…}}}],
+  "model": "gpt-6-luna"
+}
+```
+
+Response: `{"content": "…", "tool_calls": [{"name": "search", "arguments": {"query": "…"}}], "model": "gpt-6-luna"}`.
+An empty `tool_calls` means the model answered in `content`.
+
+---
+
 ### `GET /models` — List available models
 
 Returns the models advertised by the connected Copilot CLI.
