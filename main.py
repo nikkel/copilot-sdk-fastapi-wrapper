@@ -10,6 +10,7 @@ Prerequisites:
 """
 
 import asyncio
+import os
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
 
@@ -29,6 +30,9 @@ class PromptRequest(BaseModel):
     prompt: str
     model: str = "gpt-6-luna"  # cheapest non-Claude model on Copilot (2026-10)
     reasoning_effort: str | None = None  # "low" | "medium" | "high" | "xhigh"
+    # Replaces Copilot's built-in (coding-agent) system prompt entirely: fewer tokens, and the model follows
+    # your instructions instead of acting as a coding assistant.
+    system: str | None = None
 
 
 class ChatResponse(BaseModel):
@@ -46,7 +50,11 @@ copilot_client: CopilotClient | None = None
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator:
     global copilot_client
-    copilot_client = CopilotClient()
+    # "empty" mode: the runtime adds no workspace/environment context or custom instructions to prompts
+    # (fewer tokens billed, nothing about this machine is sent). It needs its own data directory.
+    home = os.environ.get("COPILOT_WRAPPER_HOME", os.path.expanduser("~/.copilot-fastapi-wrapper"))
+    os.makedirs(home, exist_ok=True)
+    copilot_client = CopilotClient(mode="empty", base_directory=home)
     await copilot_client.start()
     yield
     await copilot_client.stop()
@@ -77,14 +85,21 @@ def deny_all(request, invocation) -> PermissionDecisionReject:
 SAFE_SESSION = {"on_permission_request": deny_all, "available_tools": []}
 
 
-async def _send_prompt(prompt: str, model: str, reasoning_effort: str | None) -> str:
+def _session_kwargs(model: str, reasoning_effort: str | None, system: str | None, **extra) -> dict:
+    kwargs: dict = {**SAFE_SESSION, "model": model, **extra}
+    if reasoning_effort:
+        kwargs["reasoning_effort"] = reasoning_effort
+    if system:
+        kwargs["system_message"] = {"mode": "replace", "content": system}
+    return kwargs
+
+
+async def _send_prompt(prompt: str, model: str, reasoning_effort: str | None, system: str | None = None) -> str:
     """Open a single-use session, send *prompt*, collect the full reply."""
     if copilot_client is None:
         raise HTTPException(status_code=503, detail="Copilot client not ready")
 
-    session_kwargs: dict = {**SAFE_SESSION, "model": model}
-    if reasoning_effort:
-        session_kwargs["reasoning_effort"] = reasoning_effort
+    session_kwargs = _session_kwargs(model, reasoning_effort, system)
 
     reply_parts: list[str] = []
     done = asyncio.Event()
@@ -106,16 +121,14 @@ async def _send_prompt(prompt: str, model: str, reasoning_effort: str | None) ->
 
 
 async def _stream_prompt(
-    prompt: str, model: str, reasoning_effort: str | None
+    prompt: str, model: str, reasoning_effort: str | None, system: str | None = None
 ) -> AsyncGenerator[str, None]:
     """Open a single-use session and yield response chunks as SSE lines."""
     if copilot_client is None:
         yield "data: error: Copilot client not ready\n\n"
         return
 
-    session_kwargs: dict = {**SAFE_SESSION, "model": model, "streaming": True}
-    if reasoning_effort:
-        session_kwargs["reasoning_effort"] = reasoning_effort
+    session_kwargs = _session_kwargs(model, reasoning_effort, system, streaming=True)
 
     done = asyncio.Event()
     chunk_queue: asyncio.Queue[str | None] = asyncio.Queue()
@@ -155,7 +168,7 @@ async def chat(req: PromptRequest) -> ChatResponse:
     Send a prompt to GitHub Copilot and receive the complete response.
     Blocks until the model finishes generating.
     """
-    response = await _send_prompt(req.prompt, req.model, req.reasoning_effort)
+    response = await _send_prompt(req.prompt, req.model, req.reasoning_effort, req.system)
     return ChatResponse(response=response, model=req.model)
 
 
@@ -168,7 +181,7 @@ async def chat_stream(req: PromptRequest) -> StreamingResponse:
     The final event is `data: [DONE]`.
     """
     return StreamingResponse(
-        _stream_prompt(req.prompt, req.model, req.reasoning_effort),
+        _stream_prompt(req.prompt, req.model, req.reasoning_effort, req.system),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )

@@ -63,6 +63,9 @@ Use a virtual environment: an older `github-copilot-sdk` (0.x) installed globall
 - `uvicorn[standard]` (≥ 0.54.0) — ASGI server
 - `pydantic` (≥ 2.14.1) — request/response models
 
+The client runs in the SDK's **empty mode** (data in `~/.copilot-fastapi-wrapper`, override with
+`COPILOT_WRAPPER_HOME`): no workspace/environment context or custom instructions are added to prompts.
+
 Sessions are **answer-only**: Copilot's built-in tools (shell, file edits, …) are disabled and every
 permission request is refused, so prompts containing untrusted text can't make it act on your machine.
 
@@ -115,6 +118,7 @@ Returns the full response once the model has finished generating.
 | `prompt` | string | ✅ | The message to send to Copilot |
 | `model` | string | ❌ | Model ID (default: `gpt-6-luna`) |
 | `reasoning_effort` | string \| null | ❌ | `"low"` / `"medium"` / `"high"` / `"xhigh"` — only for models that support reasoning |
+| `system` | string \| null | ❌ | Your own system prompt; **replaces** Copilot's built-in one (fewer tokens, follows your instructions) |
 
 **Response:**
 
