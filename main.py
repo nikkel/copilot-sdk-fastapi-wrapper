@@ -27,7 +27,7 @@ from copilot.generated.rpc import PermissionDecisionReject
 
 class PromptRequest(BaseModel):
     prompt: str
-    model: str = "gpt-4.1"
+    model: str = "gpt-6-luna"  # cheapest non-Claude model on Copilot (2026-10)
     reasoning_effort: str | None = None  # "low" | "medium" | "high" | "xhigh"
 
 
