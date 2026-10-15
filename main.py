@@ -18,7 +18,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from copilot import CopilotClient
-from copilot.session import PermissionHandler
+from copilot.session import PermissionRequestResult
 
 
 # ---------------------------------------------------------------------------
@@ -64,15 +64,25 @@ app = FastAPI(
 # Helper
 # ---------------------------------------------------------------------------
 
+def deny_all(request, invocation) -> PermissionRequestResult:
+    """Refuse every permission request (shell, file writes, URLs, ...).
+
+    The API only answers prompts. Prompts may contain untrusted text (e.g. web pages from a browsing agent),
+    so the session must never be able to act on this machine.
+    """
+    return PermissionRequestResult(kind="denied-by-rules")
+
+
+# Answer-only sessions: no built-in Copilot CLI tools (shell, file edits, ...) and every permission denied.
+SAFE_SESSION = {"on_permission_request": deny_all, "available_tools": []}
+
+
 async def _send_prompt(prompt: str, model: str, reasoning_effort: str | None) -> str:
     """Open a single-use session, send *prompt*, collect the full reply."""
     if copilot_client is None:
         raise HTTPException(status_code=503, detail="Copilot client not ready")
 
-    session_kwargs: dict = {
-        "on_permission_request": PermissionHandler.approve_all,
-        "model": model,
-    }
+    session_kwargs: dict = {**SAFE_SESSION, "model": model}
     if reasoning_effort:
         session_kwargs["reasoning_effort"] = reasoning_effort
 
@@ -103,11 +113,7 @@ async def _stream_prompt(
         yield "data: error: Copilot client not ready\n\n"
         return
 
-    session_kwargs: dict = {
-        "on_permission_request": PermissionHandler.approve_all,
-        "model": model,
-        "streaming": True,
-    }
+    session_kwargs: dict = {**SAFE_SESSION, "model": model, "streaming": True}
     if reasoning_effort:
         session_kwargs["reasoning_effort"] = reasoning_effort
 
