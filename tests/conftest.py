@@ -12,30 +12,40 @@ import main
 API_KEY = "test-api-key"
 
 
-def _event(event_type: str, **data) -> SimpleNamespace:
+def event(event_type: str, **data) -> SimpleNamespace:
     return SimpleNamespace(type=SimpleNamespace(value=event_type), data=SimpleNamespace(**data))
 
 
 class FakeSession:
-    def __init__(self, streaming: bool) -> None:
-        self.streaming = streaming
+    def __init__(self, client: "FakeCopilotClient", kwargs: dict) -> None:
+        self.client = client
+        self.kwargs = kwargs
+        self.streaming = kwargs.get("streaming", False)
         self.handlers = []
 
     async def __aenter__(self) -> Self:
         return self
 
     async def __aexit__(self, *exc) -> None:
-        return None
+        self.client.sessions_closed += 1
 
     def on(self, handler) -> None:
         self.handlers.append(handler)
 
     async def send(self, prompt: str) -> None:
+        if self.client.send_error is not None:
+            raise self.client.send_error
+        if self.client.turn is not None:
+            self.client.turn(self)
+            return
         if self.streaming:
-            reply = _event("assistant.message_delta", delta_content="fake reply")
+            reply = event("assistant.message_delta", delta_content="fake reply")
         else:
-            reply = _event("assistant.message", content="fake reply")
-        for event in (reply, _event("session.idle")):
+            reply = event("assistant.message", content="fake reply")
+        self.emit(reply, event("session.idle"))
+
+    def emit(self, *events: SimpleNamespace) -> None:
+        for event in events:
             for handler in self.handlers:
                 handler(event)
 
@@ -63,6 +73,10 @@ class FakeCopilotClient:
         self.sessions: list[dict] = []
         self._models_cache = None
         self.started = False
+        self.sessions_closed = 0
+        self.turn = None  # replaces the normal reply: called with the session when a prompt is sent
+        self.send_error: Exception | None = None
+        self.create_session_error: Exception | None = None
 
     async def start(self) -> None:
         self.started = True
@@ -77,8 +91,10 @@ class FakeCopilotClient:
         return list(self._models_cache)
 
     async def create_session(self, **kwargs) -> FakeSession:
+        if self.create_session_error is not None:
+            raise self.create_session_error
         self.sessions.append(kwargs)
-        return FakeSession(streaming=kwargs.get("streaming", False))
+        return FakeSession(self, kwargs)
 
 
 @pytest.fixture(autouse=True)
