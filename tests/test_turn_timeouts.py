@@ -195,7 +195,7 @@ def test_stream_that_never_goes_idle_ends_with_the_error_event(client, fake_copi
 def test_stream_keeps_chunks_sent_before_a_timeout(client, fake_copilot):
     fake_copilot.turn = lambda session: session.emit(event("assistant.message_delta", delta_content="part"))
 
-    assert request(client, "/chat/stream").text == "data: part\n\n" + TIMEOUT_FRAME
+    assert request(client, "/chat/stream").text == 'data: {"delta": "part"}\n\n' + TIMEOUT_FRAME
 
 
 @pytest.mark.parametrize("call", ["send", "create_session"])
@@ -241,7 +241,7 @@ def test_stream_closed_by_the_client_closes_the_session_without_an_abort(client,
         await frames.aclose()
         return first
 
-    assert client.portal.call(read_one_chunk_then_leave) == "data: part\n\n"
+    assert client.portal.call(read_one_chunk_then_leave) == 'data: {"delta": "part"}\n\n'
     assert fake_copilot.turns_aborted == 0
     assert fake_copilot.sessions_closed == 1
 
