@@ -13,11 +13,12 @@ Prerequisites:
 import asyncio
 import json
 import logging
+import math
 import os
 import re
 import secrets
 import unicodedata
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, AsyncIterator
 from contextlib import asynccontextmanager
 from difflib import get_close_matches
 from time import monotonic
@@ -176,6 +177,30 @@ class RequireApiKey:
 
 
 # ---------------------------------------------------------------------------
+# Time limits
+# ---------------------------------------------------------------------------
+
+REQUEST_TIMEOUT_ENV = "COPILOT_REQUEST_TIMEOUT"
+DEFAULT_REQUEST_TIMEOUT_SECONDS = 120.0
+SESSION_CLOSE_TIMEOUT_SECONDS = 5.0  # the SDK's abort and close calls have no time limit of their own
+
+_request_timeout_seconds = DEFAULT_REQUEST_TIMEOUT_SECONDS
+
+
+def _load_request_timeout() -> float:
+    value = os.environ.get(REQUEST_TIMEOUT_ENV)
+    if value is None:
+        return DEFAULT_REQUEST_TIMEOUT_SECONDS
+    try:
+        seconds = float(value)
+    except ValueError:
+        seconds = 0.0
+    if not math.isfinite(seconds) or seconds <= 0:
+        raise RuntimeError(f"{REQUEST_TIMEOUT_ENV} must be a positive number of seconds")
+    return seconds
+
+
+# ---------------------------------------------------------------------------
 # Application lifespan – single persistent CopilotClient
 # ---------------------------------------------------------------------------
 
@@ -184,8 +209,9 @@ copilot_client: CopilotClient | None = None
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator:
-    global copilot_client, _api_key
+    global copilot_client, _api_key, _request_timeout_seconds
     _api_key = _load_api_key()  # first, so a missing key stops startup before the runtime is launched
+    _request_timeout_seconds = _load_request_timeout()
     # "empty" mode: the runtime adds no workspace/environment context or custom instructions to prompts
     # (fewer tokens billed, nothing about this machine is sent). It needs its own data directory.
     home = os.environ.get("COPILOT_WRAPPER_HOME", os.path.expanduser("~/.copilot-fastapi-wrapper"))
@@ -291,6 +317,7 @@ SAFE_SESSION = {"on_permission_request": deny_all, "available_tools": []}
 
 # The runtime's error text stays in the server log, because it can hold internal details.
 UPSTREAM_FAILURE_MESSAGE = "Copilot failed to complete the request"
+TIMEOUT_MESSAGE = "Copilot did not finish in time"
 
 
 def _session_error_text(event) -> str:
@@ -306,6 +333,15 @@ def _upstream_failure(detail: object) -> HTTPException:
     return HTTPException(status_code=502, detail=UPSTREAM_FAILURE_MESSAGE)
 
 
+def _log_turn_timeout() -> None:
+    logger.warning("Copilot turn timed out after %s seconds", _request_timeout_seconds)
+
+
+def _turn_timed_out() -> HTTPException:
+    _log_turn_timeout()
+    return HTTPException(status_code=504, detail=TIMEOUT_MESSAGE)
+
+
 def _sse_error(message: str) -> str:
     return f"event: error\ndata: {json.dumps({'message': message})}\n\n"
 
@@ -319,6 +355,35 @@ def _session_kwargs(model: str, reasoning_effort: str | None, system: str | None
     return kwargs
 
 
+def _turn_deadline() -> float:
+    """One time limit for a whole turn. Each wait checks this deadline, because a timeout scope can't stay open across
+    the stream's yields: it would fire in whatever the consumer is doing at the time, not in the turn."""
+    return asyncio.get_running_loop().time() + _request_timeout_seconds
+
+
+async def _end_session_call(call) -> None:
+    try:
+        async with asyncio.timeout(SESSION_CLOSE_TIMEOUT_SECONDS):
+            await call()
+    except Exception:
+        logger.warning("Could not close the Copilot session cleanly", exc_info=True)
+
+
+@asynccontextmanager
+async def _turn_session(session_kwargs: dict, deadline: float) -> AsyncIterator:
+    """A session that is always closed, without letting a stalled runtime hold the caller. A timed-out turn is aborted
+    first, because closing keeps the session on the runtime and may not stop a turn that's still spending."""
+    async with asyncio.timeout_at(deadline):
+        session = await copilot_client.create_session(**session_kwargs)
+    try:
+        yield session
+    except TimeoutError:
+        await _end_session_call(session.abort)
+        raise
+    finally:
+        await _end_session_call(session.disconnect)
+
+
 async def _send_prompt(prompt: str, model: str, reasoning_effort: str | None, system: str | None = None) -> str:
     """Open a single-use session, send *prompt*, collect the full reply."""
     if copilot_client is None:
@@ -329,9 +394,10 @@ async def _send_prompt(prompt: str, model: str, reasoning_effort: str | None, sy
     reply_parts: list[str] = []
     errors: list[str] = []
     done = asyncio.Event()
+    deadline = _turn_deadline()
 
     try:
-        async with await copilot_client.create_session(**session_kwargs) as session:
+        async with _turn_session(session_kwargs, deadline) as session:
 
             def on_event(event) -> None:
                 match event.type.value:
@@ -344,8 +410,11 @@ async def _send_prompt(prompt: str, model: str, reasoning_effort: str | None, sy
                         done.set()
 
             session.on(on_event)
-            await session.send(prompt)
-            await done.wait()
+            async with asyncio.timeout_at(deadline):
+                await session.send(prompt)
+                await done.wait()
+    except TimeoutError as exc:
+        raise _turn_timed_out() from exc
     except Exception as exc:
         raise _upstream_failure(exc) from exc
 
@@ -367,10 +436,11 @@ async def _stream_prompt(
     done = asyncio.Event()
     chunk_queue: asyncio.Queue[str | None] = asyncio.Queue()
     errors: list[str] = []
+    deadline = _turn_deadline()
 
     # The 200 status has already been sent by the time anything here fails, so failures are reported in the stream.
     try:
-        async with await copilot_client.create_session(**session_kwargs) as session:
+        async with _turn_session(session_kwargs, deadline) as session:
 
             def on_event(event) -> None:
                 match event.type.value:
@@ -386,14 +456,20 @@ async def _stream_prompt(
                         done.set()
 
             session.on(on_event)
-            await session.send(prompt)
+            async with asyncio.timeout_at(deadline):
+                await session.send(prompt)
 
             while True:
-                chunk = await chunk_queue.get()
+                async with asyncio.timeout_at(deadline):
+                    chunk = await chunk_queue.get()
                 if chunk is None:
                     break
                 # Server-Sent Event format
                 yield f"data: {chunk}\n\n"
+    except TimeoutError:
+        _log_turn_timeout()
+        yield _sse_error(TIMEOUT_MESSAGE)
+        return
     except Exception:
         logger.exception("Copilot session failed")
         yield _sse_error(UPSTREAM_FAILURE_MESSAGE)
@@ -442,9 +518,11 @@ async def _agent_step(req: AgentStepRequest) -> AgentStepResponse:
     errors: list[str] = []
     done = asyncio.Event()
     failed = False
+    timed_out = False
+    deadline = _turn_deadline()
 
     try:
-        async with await copilot_client.create_session(**session_kwargs) as session:
+        async with _turn_session(session_kwargs, deadline) as session:
 
             def on_event(event) -> None:
                 match event.type.value:
@@ -457,8 +535,11 @@ async def _agent_step(req: AgentStepRequest) -> AgentStepResponse:
                         done.set()
 
             session.on(on_event)
-            await session.send(req.prompt)
-            await done.wait()
+            async with asyncio.timeout_at(deadline):
+                await session.send(req.prompt)
+                await done.wait()
+    except TimeoutError:
+        timed_out = True
     except Exception:
         logger.warning("Copilot session failed", exc_info=True)
         failed = True
@@ -467,6 +548,11 @@ async def _agent_step(req: AgentStepRequest) -> AgentStepResponse:
         _log_upstream_failure(errors[-1])
         failed = True
     # Recorded tool calls are returned, marked incomplete, so the caller decides what to do with them.
+    if timed_out and not calls:
+        raise _turn_timed_out()
+    if timed_out:
+        _log_turn_timeout()
+        failed = True
     if failed and not calls:
         raise HTTPException(status_code=502, detail=UPSTREAM_FAILURE_MESSAGE)
     return AgentStepResponse(content="".join(reply_parts).strip(), tool_calls=calls, model=req.model, incomplete=failed)

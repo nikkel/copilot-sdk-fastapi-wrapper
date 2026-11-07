@@ -27,12 +27,23 @@ class FakeSession:
         return self
 
     async def __aexit__(self, *exc) -> None:
+        await self.disconnect()
+
+    async def disconnect(self) -> None:
+        await self.client.maybe_stall("disconnect")
+        if self.client.disconnect_error is not None:
+            raise self.client.disconnect_error
         self.client.sessions_closed += 1
+
+    async def abort(self) -> None:
+        self.client.turns_aborted += 1
+        await self.client.maybe_stall("abort")
 
     def on(self, handler) -> None:
         self.handlers.append(handler)
 
     async def send(self, prompt: str) -> None:
+        await self.client.maybe_stall("send")
         if self.client.send_error is not None:
             raise self.client.send_error
         if self.client.turn is not None:
@@ -74,9 +85,16 @@ class FakeCopilotClient:
         self._models_cache = None
         self.started = False
         self.sessions_closed = 0
+        self.turns_aborted = 0
+        self.stalled_calls: set[str] = set()  # names of SDK calls that never return
+        self.disconnect_error: Exception | None = None
         self.turn = None  # replaces the normal reply: called with the session when a prompt is sent
         self.send_error: Exception | None = None
         self.create_session_error: Exception | None = None
+
+    async def maybe_stall(self, call: str) -> None:
+        if call in self.stalled_calls:
+            await asyncio.Event().wait()
 
     async def start(self) -> None:
         self.started = True
@@ -91,6 +109,7 @@ class FakeCopilotClient:
         return list(self._models_cache)
 
     async def create_session(self, **kwargs) -> FakeSession:
+        await self.maybe_stall("create_session")
         if self.create_session_error is not None:
             raise self.create_session_error
         self.sessions.append(kwargs)

@@ -110,6 +110,7 @@ curl -s http://localhost:8000/models -H "Authorization: Bearer $WRAPPER_API_KEY"
 | Setting | Required | Description |
 |---|---|---|
 | `WRAPPER_API_KEY` | ✅ | The key callers must send as `Authorization: Bearer <key>` |
+| `COPILOT_REQUEST_TIMEOUT` | ❌ | Time limit in seconds for each model turn, from opening the session to the end of the reply. Default `120`. The server won't start if it isn't a positive number |
 | `WRAPPER_ALLOWED_HOSTS` | ❌ | Comma-separated hostnames the server answers to, without ports. Replaces the default `localhost,127.0.0.1`, so list those too if you still need them. Wildcards are refused at startup |
 
 Every request is checked in this order:
@@ -182,6 +183,9 @@ ask about something like a file path, put words before it. A `/` later in the pr
 If Copilot fails to complete the request, `/chat` and `/agent/step` return `502` with a generic message, and the cause
 goes to the server log. Text produced before the failure isn't returned, because it may be cut off.
 
+If the turn doesn't finish within `COPILOT_REQUEST_TIMEOUT`, `/chat` and `/agent/step` return `504`, on the same terms.
+The turn is aborted and the session closed. Closing the session can take up to 5 more seconds if the runtime has stalled.
+
 ---
 
 ### `POST /chat/stream` — Send a prompt (streaming)
@@ -198,6 +202,9 @@ stream that doesn't end with `[DONE]` as failed.
 event: error
 data: {"message": "Copilot failed to complete the request"}
 ```
+
+A stream that doesn't finish within `COPILOT_REQUEST_TIMEOUT` ends the same way, with the message
+`Copilot did not finish in time` and no `[DONE]`. The limit covers the whole stream, not each chunk.
 
 ---
 
@@ -219,10 +226,10 @@ ends, and the calls are returned for your app to run. Send the results back in t
 Response: `{"content": "…", "tool_calls": [{"name": "search", "arguments": {"query": "…"}}], "model": "gpt-6-luna", "incomplete": false}`.
 An empty `tool_calls` means the model answered in `content`.
 
-If Copilot fails after recording a tool call, the step returns `200` with the calls recorded so far and
+If Copilot fails or times out after recording a tool call, the step returns `200` with the calls recorded so far and
 `"incomplete": true`. The cause goes to the server log, not the response. Agents should **treat `incomplete: true` as a
 failed turn and review the calls before running them**: later calls may be missing, and `content` may be cut off.
-`incomplete` is `false` on a normal response. If Copilot fails with no tool call recorded, the step returns `502`.
+`incomplete` is `false` on a normal response. With no tool call recorded, a failure returns `502` and a timeout `504`.
 
 Tool names must be 1-64 letters, digits, underscores or hyphens; anything else returns `422` and no session is created.
 
@@ -507,6 +514,8 @@ uv pip compile requirements-dev.txt -c requirements.lock --universal --python-ve
 | `503 Copilot client not ready` | The server is still starting up — wait a moment and retry |
 | `503 Could not fetch the Copilot model list` | Check the network and `gh auth login`, then retry; the server log has the cause |
 | `422` with `prompt must not start with /` | Start the prompt with words instead of `/`, even if it's a file path. Leading whitespace and invisible characters don't count |
+| `504 Copilot did not finish in time` | Retry, or raise `COPILOT_REQUEST_TIMEOUT` for long replies |
+| `RuntimeError: COPILOT_REQUEST_TIMEOUT must be a positive number of seconds` | Set it to a number above 0, or unset it to use the default of 120 |
 | `502 Copilot failed to complete the request` | The server log has the cause, for example a `reasoning_effort` the model doesn't support |
 | `422` on `reasoning_effort` | Use `low`, `medium`, `high`, `xhigh` or `max` |
 | `422` with `valid_models` | The model ID isn't available to your account: use one from `detail.valid_models` or `GET /models` |
