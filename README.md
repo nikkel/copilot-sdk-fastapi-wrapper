@@ -1,5 +1,12 @@
 # Copilot Prompt API
 
+[![CI](https://github.com/nikkel/copilot-sdk-fastapi-wrapper/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/nikkel/copilot-sdk-fastapi-wrapper/actions/workflows/ci.yml)
+[![Python 3.11 | 3.13](https://img.shields.io/badge/python-3.11%20%7C%203.13-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![FastAPI](https://img.shields.io/badge/FastAPI-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
+[![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
+[![Audited with pip-audit](https://img.shields.io/badge/audited%20with-pip--audit-4B8BBE)](https://github.com/pypa/pip-audit)
+[![Last commit](https://img.shields.io/github/last-commit/nikkel/copilot-sdk-fastapi-wrapper)](https://github.com/nikkel/copilot-sdk-fastapi-wrapper/commits/main)
+
 A FastAPI wrapper around the [github-copilot-sdk](https://pypi.org/project/github-copilot-sdk/) that exposes GitHub Copilot as a local HTTP API. Send prompts, stream responses, and list available models — all from any HTTP client.
 
 ---
@@ -438,7 +445,13 @@ The tests use a fake SDK client: they don't start the Copilot runtime or spend c
 ```bash
 pip install --require-hashes -r requirements-dev.lock
 python -m pytest
+ruff check .
+pip-audit --require-hashes --disable-pip -r requirements.lock
+pip-audit --require-hashes --disable-pip -r requirements-dev.lock
 ```
+
+GitHub Actions runs the same checks on every pull request and push to `main`, with the tests on Python 3.11 and 3.13.
+The workflow uses no secrets and makes no Copilot calls.
 
 ---
 
