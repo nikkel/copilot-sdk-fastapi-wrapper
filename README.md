@@ -181,7 +181,8 @@ ask about something like a file path, put words before it. A `/` later in the pr
 ```
 
 If Copilot fails to complete the request, `/chat` and `/agent/step` return `502` with a generic message, and the cause
-goes to the server log. Text produced before the failure isn't returned, because it may be cut off.
+goes to the server log. Text produced before the failure isn't returned, because it may be cut off. A reply with no text
+after removing whitespace also returns `502`, unless `/agent/step` recorded a tool call.
 
 If the turn doesn't finish within `COPILOT_REQUEST_TIMEOUT`, `/chat` and `/agent/step` return `504`, on the same terms.
 The turn is aborted and the session closed. Closing the session can take up to 5 more seconds if the runtime has stalled.
@@ -203,6 +204,9 @@ stream that doesn't end with `[DONE]` as failed.
 event: error
 data: {"message": "Copilot failed to complete the request"}
 ```
+
+A stream that ends with no chunks also ends this way. A stream of only whitespace still ends with `[DONE]`, because its
+chunks have already been sent by then.
 
 A stream that doesn't finish within `COPILOT_REQUEST_TIMEOUT` ends the same way, with the message
 `Copilot did not finish in time` and no `[DONE]`. The limit covers the whole stream, not each chunk.
@@ -526,7 +530,7 @@ uv pip compile requirements-dev.txt -c requirements.lock --universal --python-ve
 | `422` with `prompt must not start with /` | Start the prompt with words instead of `/`, even if it's a file path. Leading whitespace and invisible characters don't count |
 | `504 Copilot did not finish in time` | Retry, or raise `COPILOT_REQUEST_TIMEOUT` for long replies |
 | `RuntimeError: COPILOT_REQUEST_TIMEOUT must be a positive number of seconds` | Set it to a number above 0, or unset it to use the default of 120 |
-| `502 Copilot failed to complete the request` | The server log has the cause, for example a `reasoning_effort` the model doesn't support |
+| `502 Copilot failed to complete the request` | The server log has the cause, for example an empty reply or a `reasoning_effort` the model doesn't support |
 | `422` on `reasoning_effort` | Use `low`, `medium`, `high`, `xhigh` or `max` |
 | `422` with `valid_models` | The model ID isn't available to your account: use one from `detail.valid_models` or `GET /models` |
 | `ModuleNotFoundError: No module named 'copilot'` | Run `pip install --require-hashes -r requirements.lock` |
