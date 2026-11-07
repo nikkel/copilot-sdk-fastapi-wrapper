@@ -180,6 +180,12 @@ async def create_session(**kwargs):
     return session
 fake.create_session = create_session
 
+real_delete_session = fake.delete_session
+async def delete_session(session_id):
+    await real_delete_session(session_id)
+    print("SESSION DELETED", flush=True)
+fake.delete_session = delete_session
+
 uvicorn.run(main.app, host="127.0.0.1", port=int(sys.argv[1]), timeout_graceful_shutdown=None if sys.argv[2] == "None" else int(sys.argv[2]))
 """
 
@@ -239,6 +245,7 @@ def test_sigterm_with_a_graceful_shutdown_limit_ends_a_stalled_turn(tmp_path):
 
     assert "TURN ABORTED" in output
     assert "SESSION CLOSED" in output
+    assert output.count("SESSION DELETED") == 1
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="needs SIGTERM")
@@ -247,3 +254,4 @@ def test_sigterm_with_no_graceful_shutdown_limit_exits_when_the_turn_times_out(t
 
     assert "TURN ABORTED" in output
     assert "SESSION CLOSED" in output
+    assert output.count("SESSION DELETED") == 1

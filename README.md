@@ -86,6 +86,10 @@ The client runs in the SDK's **empty mode** (data in `~/.copilot-fastapi-wrapper
 Sessions are **answer-only**: Copilot's built-in tools (shell, file edits, …) are disabled and every
 permission request is refused, so prompts containing untrusted text can't make it act on your machine.
 
+Sessions are **deleted when the request ends**, including failed, timed-out and disconnected ones, because a kept session
+contains its prompts and replies. Only the request's own session is deleted, so sessions already on disk aren't touched.
+Set `COPILOT_KEEP_SESSIONS=true` to keep them. A failed delete is logged and doesn't change the response.
+
 ---
 
 ## Running the Server
@@ -115,6 +119,7 @@ curl -s http://localhost:8000/models -H "Authorization: Bearer $WRAPPER_API_KEY"
 | `COPILOT_MAX_SYSTEM_CHARS` | ❌ | Longest `system` accepted, in characters. Default `1000000` |
 | `COPILOT_MAX_TOOLS` | ❌ | Most `tools` accepted by `/agent/step`. Default `128` |
 | `COPILOT_MAX_CONCURRENT_SESSIONS` | ❌ | Most requests with a session open at once, across all routes. Default `20` |
+| `COPILOT_KEEP_SESSIONS` | ❌ | `true` keeps every session on disk, with its prompts and replies, and logs one line at startup. Default `false`. The server won't start on any other value |
 | `WRAPPER_ALLOWED_HOSTS` | ❌ | Comma-separated hostnames the server answers to, without ports. Replaces the default `localhost,127.0.0.1`, so list those too if you still need them. Wildcards are refused at startup |
 
 Every request is checked in this order:
@@ -204,7 +209,7 @@ goes to the server log. Text produced before the failure isn't returned, because
 after removing whitespace also returns `502`, unless `/agent/step` recorded a tool call.
 
 If the turn doesn't finish within `COPILOT_REQUEST_TIMEOUT`, `/chat` and `/agent/step` return `504`, on the same terms.
-The turn is aborted and the session closed. Closing the session can take up to 5 more seconds if the runtime has stalled.
+The turn is aborted and the session closed. Aborting, closing and deleting the session can each take up to 5 more seconds if the runtime has stalled.
 
 ---
 
@@ -551,6 +556,7 @@ uv pip compile requirements-dev.txt -c requirements.lock --universal --python-ve
 | `422` with `prompt must not start with /` | Start the prompt with words instead of `/`, even if it's a file path. Leading whitespace and invisible characters don't count |
 | `429 Too many concurrent sessions` | Wait for `Retry-After` seconds, or raise `COPILOT_MAX_CONCURRENT_SESSIONS` |
 | `504 Copilot did not finish in time` | Retry, or raise `COPILOT_REQUEST_TIMEOUT` for long replies |
+| `RuntimeError: COPILOT_KEEP_SESSIONS must be true or false` | Use exactly `true` or `false`, or unset it to delete sessions |
 | `RuntimeError: COPILOT_REQUEST_TIMEOUT must be a positive number of seconds` | Set it to a number above 0, or unset it to use the default of 120 |
 | `502 Copilot failed to complete the request` | The server log has the cause, for example an empty reply or a `reasoning_effort` the model doesn't support |
 | `422` on `reasoning_effort` | Use `low`, `medium`, `high`, `xhigh` or `max` |

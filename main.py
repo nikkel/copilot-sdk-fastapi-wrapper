@@ -265,13 +265,14 @@ copilot_client: CopilotClient | None = None
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator:
     global copilot_client, _api_key, _request_timeout_seconds
-    global _max_prompt_chars, _max_system_chars, _max_tools, _max_concurrent_sessions
+    global _max_prompt_chars, _max_system_chars, _max_tools, _max_concurrent_sessions, _keep_sessions
     _api_key = _load_api_key()  # first, so a missing key stops startup before the runtime is launched
     _request_timeout_seconds = _load_request_timeout()
     _max_prompt_chars = _load_positive_int("COPILOT_MAX_PROMPT_CHARS", DEFAULT_MAX_PROMPT_CHARS)
     _max_system_chars = _load_positive_int("COPILOT_MAX_SYSTEM_CHARS", DEFAULT_MAX_SYSTEM_CHARS)
     _max_tools = _load_positive_int("COPILOT_MAX_TOOLS", DEFAULT_MAX_TOOLS)
     _max_concurrent_sessions = _load_positive_int("COPILOT_MAX_CONCURRENT_SESSIONS", DEFAULT_MAX_CONCURRENT_SESSIONS)
+    _keep_sessions = _load_keep_sessions()
     # "empty" mode: the runtime adds no workspace/environment context or custom instructions to prompts
     # (fewer tokens billed, nothing about this machine is sent). It needs its own data directory.
     home = os.environ.get("COPILOT_WRAPPER_HOME", os.path.expanduser("~/.copilot-fastapi-wrapper"))
@@ -284,6 +285,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
     yield
     # uvicorn doesn't wait for the turns it cancels at its graceful shutdown limit, so finish them before stopping.
     await asyncio.gather(*(_close_session(session, abort=True) for session in list(_open_sessions)))
+    await asyncio.gather(*_closing_sessions)
     await copilot_client.stop()
 
 
@@ -432,16 +434,43 @@ async def _end_session_call(call) -> None:
         logger.warning("Could not close the Copilot session cleanly", exc_info=True)
 
 
+KEEP_SESSIONS_ENV = "COPILOT_KEEP_SESSIONS"
+
+_keep_sessions = False
 _open_sessions: set = set()
 _closing_sessions: set[asyncio.Task] = set()  # keeps a reference, so a running close isn't garbage collected
 
 
+def _load_keep_sessions() -> bool:
+    value = os.environ.get(KEEP_SESSIONS_ENV, "false")
+    if value not in ("true", "false"):
+        raise RuntimeError(f"{KEEP_SESSIONS_ENV} must be true or false")
+    if value == "true":
+        logger.warning("%s is true, so sessions stay on disk with their prompts and replies", KEEP_SESSIONS_ENV)
+    return value == "true"
+
+
+async def _delete_session(session_id: str) -> None:
+    """Only ever this request's session, by ID. A failure logs the exception's type alone, so no prompt text can reach
+    the log, and doesn't change the caller's response."""
+    try:
+        async with asyncio.timeout(SESSION_CLOSE_TIMEOUT_SECONDS):
+            await copilot_client.delete_session(session_id)
+    except Exception as exc:  # noqa: BLE001 - any failure must leave the response alone, and exc's text isn't logged
+        logger.warning("Could not delete Copilot session %s: %s", session_id, type(exc).__name__)
+
+
 async def _close_session(session, abort: bool) -> None:
+    if session not in _open_sessions:
+        return  # shutdown and the request's own clean-up can both get here
+    _open_sessions.discard(session)
+
     async def close() -> None:
         if abort:
             await _end_session_call(session.abort)
         await _end_session_call(session.disconnect)
-        _open_sessions.discard(session)
+        if not _keep_sessions:
+            await _delete_session(session.session_id)
 
     # In its own task, so it finishes even if this request is cancelled. On a client disconnect, Starlette cancels a
     # stream again at every await, which would interrupt the SDK's calls here and leave the session open.
