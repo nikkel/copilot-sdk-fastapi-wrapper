@@ -20,6 +20,7 @@ class FakeSession:
     def __init__(self, client: "FakeCopilotClient", kwargs: dict) -> None:
         self.client = client
         self.kwargs = kwargs
+        self.session_id = f"session-{len(client.sessions) - 1}"
         self.streaming = kwargs.get("streaming", False)
         self.handlers = []
 
@@ -31,6 +32,7 @@ class FakeSession:
 
     async def disconnect(self) -> None:
         await asyncio.sleep(0)  # a real round trip, so a cancellation still being delivered would interrupt this
+        self.client.calls.append(("disconnect", self.session_id))
         await self.client.maybe_stall("disconnect")
         if self.client.disconnect_error is not None:
             raise self.client.disconnect_error
@@ -87,6 +89,9 @@ class FakeCopilotClient:
         self._models_cache = None
         self.started = False
         self.sessions_closed = 0
+        self.calls: list[tuple[str, str]] = []
+        self.deleted: list[str] = []
+        self.delete_error: Exception | None = None
         self.turns_aborted = 0
         self.stalled_calls: set[str] = set()  # names of SDK calls that never return
         self.disconnect_error: Exception | None = None
@@ -110,6 +115,14 @@ class FakeCopilotClient:
         if self._models_cache is None:
             self._models_cache = (await self.models_api.list(None)).models
         return list(self._models_cache)
+
+    async def delete_session(self, session_id: str) -> None:
+        await asyncio.sleep(0)
+        self.calls.append(("delete", session_id))
+        await self.maybe_stall("delete_session")
+        if self.delete_error is not None:
+            raise self.delete_error
+        self.deleted.append(session_id)
 
     async def create_session(self, **kwargs) -> FakeSession:
         await self.maybe_stall("create_session")
