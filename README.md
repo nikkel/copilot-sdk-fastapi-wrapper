@@ -263,7 +263,7 @@ session is created. Other fields in `function` are ignored.
 
 ### `GET /models` — List available models
 
-Returns the models advertised by the connected Copilot CLI.
+Returns the models advertised by the connected Copilot CLI, or `503` if the list can't be fetched.
 
 **Response:**
 

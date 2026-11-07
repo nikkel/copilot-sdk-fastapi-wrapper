@@ -762,7 +762,12 @@ async def list_models() -> dict:
     """Return the models advertised by the connected Copilot CLI."""
     if copilot_client is None:
         raise HTTPException(status_code=503, detail="Copilot client not ready")
-    models = await copilot_client.list_models()
+    try:
+        async with asyncio.timeout(MODEL_LIST_TIMEOUT_SECONDS):
+            models = await copilot_client.list_models()
+    except Exception as exc:
+        logger.warning("Could not fetch the Copilot model list: %r", exc)
+        raise HTTPException(status_code=503, detail="Could not fetch the Copilot model list") from exc
     return {"models": models}
 
 

@@ -106,6 +106,7 @@ class FakeCopilotClient:
 
     async def list_models(self) -> list[SimpleNamespace]:
         """Like the real SDK: fetches once, then returns that result until the client disconnects."""
+        await self.maybe_stall("list_models")
         if self._models_cache is None:
             self._models_cache = (await self.models_api.list(None)).models
         return list(self._models_cache)
