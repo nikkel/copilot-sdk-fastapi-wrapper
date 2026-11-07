@@ -8,6 +8,8 @@ from fastapi.testclient import TestClient
 
 import main
 
+API_KEY = "test-api-key"
+
 
 def _event(event_type: str, **data) -> SimpleNamespace:
     return SimpleNamespace(type=SimpleNamespace(value=event_type), data=SimpleNamespace(**data))
@@ -59,9 +61,10 @@ class FakeCopilotClient:
         self.rpc = SimpleNamespace(models=self.models_api)
         self.sessions: list[dict] = []
         self._models_cache = None
+        self.started = False
 
     async def start(self) -> None:
-        return None
+        self.started = True
 
     async def stop(self) -> None:
         return None
@@ -83,14 +86,25 @@ def fake_copilot(monkeypatch, tmp_path) -> FakeCopilotClient:
     fake = FakeCopilotClient()
     monkeypatch.setattr(main, "CopilotClient", lambda **kwargs: fake)
     monkeypatch.setattr(main, "copilot_client", None)
+    monkeypatch.setattr(main, "_api_key", None, raising=False)
     monkeypatch.setenv("COPILOT_WRAPPER_HOME", str(tmp_path))
+    monkeypatch.setenv("WRAPPER_API_KEY", API_KEY)
     return fake
 
 
 @pytest.fixture
 def client(fake_copilot):
-    """A test client with the app's lifespan running, so each test starts from a fresh process state."""
-    with TestClient(main.app) as test_client:
+    """An authorised local caller, with the app's lifespan running so each test starts from a fresh process state."""
+    with TestClient(
+        main.app, base_url="http://localhost", headers={"Authorization": f"Bearer {API_KEY}"}
+    ) as test_client:
+        yield test_client
+
+
+@pytest.fixture
+def anonymous(fake_copilot):
+    """A local caller that sends no API key, with the app's lifespan running."""
+    with TestClient(main.app, base_url="http://localhost") as test_client:
         yield test_client
 
 
