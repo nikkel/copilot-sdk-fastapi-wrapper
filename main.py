@@ -11,6 +11,7 @@ Prerequisites:
 """
 
 import asyncio
+import json
 import logging
 import os
 import re
@@ -24,6 +25,7 @@ from typing import Annotated
 
 from copilot import CopilotClient
 from copilot.generated.rpc import ModelsListRequest, PermissionDecisionReject
+from copilot.session import ReasoningEffort
 from copilot.tools import Tool, ToolInvocation, ToolResult
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
@@ -60,7 +62,7 @@ Prompt = Annotated[str, AfterValidator(_not_a_slash_command)]
 class PromptRequest(BaseModel):
     prompt: Prompt
     model: str = "gpt-6-luna"  # cheapest non-Claude model on Copilot (2026-10)
-    reasoning_effort: str | None = None  # "low" | "medium" | "high" | "xhigh"
+    reasoning_effort: ReasoningEffort | None = None
     # Replaces Copilot's built-in (coding-agent) system prompt entirely: fewer tokens, and the model follows
     # your instructions instead of acting as a coding assistant.
     system: str | None = None
@@ -95,7 +97,7 @@ class AgentStepRequest(BaseModel):
     system: str | None = None
     tools: list[ToolSpec] = []
     model: str = "gpt-6-luna"
-    reasoning_effort: str | None = None
+    reasoning_effort: ReasoningEffort | None = None
 
 
 class ToolCall(BaseModel):
@@ -107,6 +109,7 @@ class AgentStepResponse(BaseModel):
     content: str
     tool_calls: list[ToolCall]
     model: str
+    incomplete: bool = False  # the turn failed after recording tool_calls, so treat it as failed
 
 
 # ---------------------------------------------------------------------------
@@ -286,6 +289,27 @@ def deny_all(request, invocation) -> PermissionDecisionReject:
 SAFE_SESSION = {"on_permission_request": deny_all, "available_tools": []}
 
 
+# The runtime's error text stays in the server log, because it can hold internal details.
+UPSTREAM_FAILURE_MESSAGE = "Copilot failed to complete the request"
+
+
+def _session_error_text(event) -> str:
+    return getattr(event.data, "message", "") or "unknown error"
+
+
+def _log_upstream_failure(detail: object) -> None:
+    logger.warning("Copilot session failed: %r", detail)
+
+
+def _upstream_failure(detail: object) -> HTTPException:
+    _log_upstream_failure(detail)
+    return HTTPException(status_code=502, detail=UPSTREAM_FAILURE_MESSAGE)
+
+
+def _sse_error(message: str) -> str:
+    return f"event: error\ndata: {json.dumps({'message': message})}\n\n"
+
+
 def _session_kwargs(model: str, reasoning_effort: str | None, system: str | None, **extra) -> dict:
     kwargs: dict = {**SAFE_SESSION, "model": model, **extra}
     if reasoning_effort:
@@ -303,21 +327,30 @@ async def _send_prompt(prompt: str, model: str, reasoning_effort: str | None, sy
     session_kwargs = _session_kwargs(model, reasoning_effort, system)
 
     reply_parts: list[str] = []
+    errors: list[str] = []
     done = asyncio.Event()
 
-    async with await copilot_client.create_session(**session_kwargs) as session:
+    try:
+        async with await copilot_client.create_session(**session_kwargs) as session:
 
-        def on_event(event) -> None:
-            match event.type.value:
-                case "assistant.message":
-                    reply_parts.append(event.data.content or "")
-                case "session.idle":
-                    done.set()
+            def on_event(event) -> None:
+                match event.type.value:
+                    case "assistant.message":
+                        reply_parts.append(event.data.content or "")
+                    case "session.error":
+                        errors.append(_session_error_text(event))
+                        done.set()  # idle may not follow an error
+                    case "session.idle":
+                        done.set()
 
-        session.on(on_event)
-        await session.send(prompt)
-        await done.wait()
+            session.on(on_event)
+            await session.send(prompt)
+            await done.wait()
+    except Exception as exc:
+        raise _upstream_failure(exc) from exc
 
+    if errors:
+        raise _upstream_failure(errors[-1])
     return "".join(reply_parts)
 
 
@@ -326,35 +359,50 @@ async def _stream_prompt(
 ) -> AsyncGenerator[str, None]:
     """Open a single-use session and yield response chunks as SSE lines."""
     if copilot_client is None:
-        yield "data: error: Copilot client not ready\n\n"
+        yield _sse_error("Copilot client not ready")
         return
 
     session_kwargs = _session_kwargs(model, reasoning_effort, system, streaming=True)
 
     done = asyncio.Event()
     chunk_queue: asyncio.Queue[str | None] = asyncio.Queue()
+    errors: list[str] = []
 
-    async with await copilot_client.create_session(**session_kwargs) as session:
+    # The 200 status has already been sent by the time anything here fails, so failures are reported in the stream.
+    try:
+        async with await copilot_client.create_session(**session_kwargs) as session:
 
-        def on_event(event) -> None:
-            match event.type.value:
-                case "assistant.message_delta":
-                    delta = event.data.delta_content or ""
-                    if delta:
-                        chunk_queue.put_nowait(delta)
-                case "session.idle":
-                    chunk_queue.put_nowait(None)  # sentinel
-                    done.set()
+            def on_event(event) -> None:
+                match event.type.value:
+                    case "assistant.message_delta":
+                        delta = event.data.delta_content or ""
+                        if delta:
+                            chunk_queue.put_nowait(delta)
+                    case "session.error":
+                        errors.append(_session_error_text(event))
+                        chunk_queue.put_nowait(None)  # idle may not follow an error
+                    case "session.idle":
+                        chunk_queue.put_nowait(None)  # sentinel
+                        done.set()
 
-        session.on(on_event)
-        await session.send(prompt)
+            session.on(on_event)
+            await session.send(prompt)
 
-        while True:
-            chunk = await chunk_queue.get()
-            if chunk is None:
-                break
-            # Server-Sent Event format
-            yield f"data: {chunk}\n\n"
+            while True:
+                chunk = await chunk_queue.get()
+                if chunk is None:
+                    break
+                # Server-Sent Event format
+                yield f"data: {chunk}\n\n"
+    except Exception:
+        logger.exception("Copilot session failed")
+        yield _sse_error(UPSTREAM_FAILURE_MESSAGE)
+        return
+
+    if errors:
+        _log_upstream_failure(errors[-1])
+        yield _sse_error(UPSTREAM_FAILURE_MESSAGE)
+        return
 
     yield "data: [DONE]\n\n"
 
@@ -393,25 +441,35 @@ async def _agent_step(req: AgentStepRequest) -> AgentStepResponse:
     reply_parts: list[str] = []
     errors: list[str] = []
     done = asyncio.Event()
+    failed = False
 
-    async with await copilot_client.create_session(**session_kwargs) as session:
+    try:
+        async with await copilot_client.create_session(**session_kwargs) as session:
 
-        def on_event(event) -> None:
-            match event.type.value:
-                case "assistant.message":
-                    reply_parts.append(event.data.content or "")
-                case "session.error":
-                    errors.append(getattr(event.data, "message", "") or "unknown error")
-                case "session.idle":
-                    done.set()
+            def on_event(event) -> None:
+                match event.type.value:
+                    case "assistant.message":
+                        reply_parts.append(event.data.content or "")
+                    case "session.error":
+                        errors.append(_session_error_text(event))
+                        done.set()  # idle may not follow an error
+                    case "session.idle":
+                        done.set()
 
-        session.on(on_event)
-        await session.send(req.prompt)
-        await done.wait()
+            session.on(on_event)
+            await session.send(req.prompt)
+            await done.wait()
+    except Exception:
+        logger.warning("Copilot session failed", exc_info=True)
+        failed = True
 
-    if errors and not calls and not "".join(reply_parts).strip():
-        raise HTTPException(status_code=502, detail=f"Copilot: {errors[-1]}")
-    return AgentStepResponse(content="".join(reply_parts).strip(), tool_calls=calls, model=req.model)
+    if errors:
+        _log_upstream_failure(errors[-1])
+        failed = True
+    # Recorded tool calls are returned, marked incomplete, so the caller decides what to do with them.
+    if failed and not calls:
+        raise HTTPException(status_code=502, detail=UPSTREAM_FAILURE_MESSAGE)
+    return AgentStepResponse(content="".join(reply_parts).strip(), tool_calls=calls, model=req.model, incomplete=failed)
 
 
 @app.post("/agent/step", response_model=AgentStepResponse, summary="One step of an agent (native tool calling)")
@@ -442,7 +500,7 @@ async def chat_stream(req: PromptRequest) -> StreamingResponse:
     Send a prompt and receive the response as a stream of Server-Sent Events.
 
     Each event has the form `data: <chunk>`.
-    The final event is `data: [DONE]`.
+    A successful stream ends with `data: [DONE]`. A failed one ends with an `error` event and no `[DONE]`.
     """
     await _require_known_model(req.model)  # before the response starts, so errors are real HTTP status codes
     return StreamingResponse(

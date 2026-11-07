@@ -162,7 +162,7 @@ Returns the full response once the model has finished generating.
 |---|---|---|---|
 | `prompt` | string | ✅ | The message to send to Copilot. Can't start with `/`, even after whitespace or invisible characters |
 | `model` | string | ❌ | Model ID (default: `gpt-6-luna`) |
-| `reasoning_effort` | string \| null | ❌ | `"low"` / `"medium"` / `"high"` / `"xhigh"` — only for models that support reasoning |
+| `reasoning_effort` | string \| null | ❌ | `"low"` / `"medium"` / `"high"` / `"xhigh"` / `"max"` — any other value returns `422`. Only for models that support reasoning, and which levels work depends on the model |
 | `system` | string \| null | ❌ | Your own system prompt; **replaces** Copilot's built-in one (fewer tokens, follows your instructions) |
 
 A prompt that starts with `/` returns `422` on `/chat`, `/chat/stream` and `/agent/step`, and no session is created,
@@ -179,13 +179,25 @@ ask about something like a file path, put words before it. A `/` later in the pr
 }
 ```
 
+If Copilot fails to complete the request, `/chat` and `/agent/step` return `502` with a generic message, and the cause
+goes to the server log. Text produced before the failure isn't returned, because it may be cut off.
+
 ---
 
 ### `POST /chat/stream` — Send a prompt (streaming)
 
-Returns the response as a stream of [Server-Sent Events (SSE)](https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events/Using_server-sent_events). Each event contains one chunk of text. The final event is `data: [DONE]`.
+Returns the response as a stream of [Server-Sent Events (SSE)](https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events/Using_server-sent_events). Each event contains one chunk of text. A successful stream ends with `data: [DONE]`.
 
 Same request body as `/chat`.
+
+The `200` status is sent before the model replies, so a failure can't change it. A failed stream instead ends with this
+event and no `[DONE]`, and the cause goes to the server log. Chunks sent before the failure may be cut off, so treat a
+stream that doesn't end with `[DONE]` as failed.
+
+```
+event: error
+data: {"message": "Copilot failed to complete the request"}
+```
 
 ---
 
@@ -204,8 +216,13 @@ ends, and the calls are returned for your app to run. Send the results back in t
 }
 ```
 
-Response: `{"content": "…", "tool_calls": [{"name": "search", "arguments": {"query": "…"}}], "model": "gpt-6-luna"}`.
+Response: `{"content": "…", "tool_calls": [{"name": "search", "arguments": {"query": "…"}}], "model": "gpt-6-luna", "incomplete": false}`.
 An empty `tool_calls` means the model answered in `content`.
+
+If Copilot fails after recording a tool call, the step returns `200` with the calls recorded so far and
+`"incomplete": true`. The cause goes to the server log, not the response. Agents should **treat `incomplete: true` as a
+failed turn and review the calls before running them**: later calls may be missing, and `content` may be cut off.
+`incomplete` is `false` on a normal response. If Copilot fails with no tool call recorded, the step returns `502`.
 
 Tool names must be 1-64 letters, digits, underscores or hyphens; anything else returns `422` and no session is created.
 
@@ -338,6 +355,8 @@ with requests.post(
 ) as r:
     for line in r.iter_lines():
         if line:
+            if line == b"event: error":
+                raise RuntimeError("Copilot failed to complete the request")
             text = line.decode().removeprefix("data: ")
             if text == "[DONE]":
                 break
@@ -377,6 +396,8 @@ async def stream(prompt: str, model: str = "gpt-5-mini") -> None:
             json={"prompt": prompt, "model": model},
         ) as r:
             async for line in r.aiter_lines():
+                if line == "event: error":
+                    raise RuntimeError("Copilot failed to complete the request")
                 if line.startswith("data: "):
                     chunk = line[6:]
                     if chunk == "[DONE]":
@@ -432,6 +453,7 @@ while (true) {
   if (done) break;
   const lines = decoder.decode(value).split("\n");
   for (const line of lines) {
+    if (line === "event: error") throw new Error("Copilot failed to complete the request");
     if (line.startsWith("data: ")) {
       const chunk = line.slice(6);
       if (chunk === "[DONE]") break;
@@ -485,6 +507,8 @@ uv pip compile requirements-dev.txt -c requirements.lock --universal --python-ve
 | `503 Copilot client not ready` | The server is still starting up — wait a moment and retry |
 | `503 Could not fetch the Copilot model list` | Check the network and `gh auth login`, then retry; the server log has the cause |
 | `422` with `prompt must not start with /` | Start the prompt with words instead of `/`, even if it's a file path. Leading whitespace and invisible characters don't count |
+| `502 Copilot failed to complete the request` | The server log has the cause, for example a `reasoning_effort` the model doesn't support |
+| `422` on `reasoning_effort` | Use `low`, `medium`, `high`, `xhigh` or `max` |
 | `422` with `valid_models` | The model ID isn't available to your account: use one from `detail.valid_models` or `GET /models` |
 | `ModuleNotFoundError: No module named 'copilot'` | Run `pip install --require-hashes -r requirements.lock` |
 | `ImportError: cannot import name 'PermissionDecisionReject'` | An old SDK is installed: activate `.venv` (or `pip install --require-hashes -r requirements.lock` in it) |
