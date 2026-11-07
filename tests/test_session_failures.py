@@ -169,7 +169,7 @@ def test_stream_with_a_session_error_ends_with_the_error_event_and_no_done(clien
 def test_stream_keeps_chunks_sent_before_a_session_error(client, fake_copilot):
     fake_copilot.turn = lambda session: session.emit(event("assistant.message_delta", delta_content="part"), error_event())
 
-    assert request(client, "/chat/stream").text == "data: part\n\n" + ERROR_FRAME
+    assert request(client, "/chat/stream").text == 'data: {"delta": "part"}\n\n' + ERROR_FRAME
 
 
 def test_exception_from_send_ends_the_stream_with_the_error_event(client, fake_copilot, caplog):
@@ -200,7 +200,7 @@ def test_stream_with_no_client_ends_with_the_error_event():
 
 
 def test_successful_stream_still_ends_with_done(client):
-    assert request(client, "/chat/stream").text == "data: fake reply\n\n" + DONE_FRAME
+    assert request(client, "/chat/stream").text == 'data: {"delta": "fake reply"}\n\n' + DONE_FRAME
 
 
 # --- Reasoning effort ---------------------------------------------------------------------------------------------

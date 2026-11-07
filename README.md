@@ -190,7 +190,8 @@ The turn is aborted and the session closed. Closing the session can take up to 5
 
 ### `POST /chat/stream` — Send a prompt (streaming)
 
-Returns the response as a stream of [Server-Sent Events (SSE)](https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events/Using_server-sent_events). Each event contains one chunk of text. A successful stream ends with `data: [DONE]`.
+Returns the response as a stream of [Server-Sent Events (SSE)](https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events/Using_server-sent_events). Each event holds one chunk of text as JSON, `data: {"delta": "<chunk>"}`, so newlines and other text in a reply can't
+be mistaken for parts of the stream. A successful stream ends with `data: [DONE]`, the only `data:` value that isn't JSON.
 
 Same request body as `/chat`.
 
@@ -298,9 +299,12 @@ curl -s -N -X POST http://localhost:8000/chat/stream \
 Each line of output looks like:
 
 ```
-data: Async/await is
-data:  a way to write
-data:  concurrent code...
+data: {"delta": "Async/await is"}
+
+data: {"delta": " a way to write"}
+
+data: {"delta": " concurrent code..."}
+
 data: [DONE]
 ```
 
@@ -351,6 +355,7 @@ print(response.json()["response"])
 #### Streaming with `requests`
 
 ```python
+import json
 import os
 import requests
 
@@ -367,7 +372,7 @@ with requests.post(
             text = line.decode().removeprefix("data: ")
             if text == "[DONE]":
                 break
-            print(text, end="", flush=True)
+            print(json.loads(text)["delta"], end="", flush=True)
 print()
 ```
 
@@ -377,6 +382,7 @@ print()
 
 ```python
 import asyncio
+import json
 import os
 import httpx
 
@@ -409,7 +415,7 @@ async def stream(prompt: str, model: str = "gpt-5-mini") -> None:
                     chunk = line[6:]
                     if chunk == "[DONE]":
                         break
-                    print(chunk, end="", flush=True)
+                    print(json.loads(chunk)["delta"], end="", flush=True)
     print()
 
 
@@ -454,17 +460,21 @@ const response = await fetch("http://localhost:8000/chat/stream", {
 
 const reader = response.body.getReader();
 const decoder = new TextDecoder();
+let buffer = "";
 
-while (true) {
+read: while (true) {
   const { done, value } = await reader.read();
   if (done) break;
-  const lines = decoder.decode(value).split("\n");
+  // A read can end partway through a line, so keep the unfinished part for the next one.
+  buffer += decoder.decode(value, { stream: true });
+  const lines = buffer.split("\n");
+  buffer = lines.pop();
   for (const line of lines) {
     if (line === "event: error") throw new Error("Copilot failed to complete the request");
     if (line.startsWith("data: ")) {
-      const chunk = line.slice(6);
-      if (chunk === "[DONE]") break;
-      process.stdout.write(chunk);
+      const data = line.slice(6);
+      if (data === "[DONE]") break read;
+      process.stdout.write(JSON.parse(data).delta);
     }
   }
 }
