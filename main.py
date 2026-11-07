@@ -6,21 +6,26 @@ Prerequisites:
   2. Authenticate:           gh auth login
   3. Install dependencies:   pip install --require-hashes -r requirements.lock
      (github-copilot-sdk 1.x downloads the Copilot CLI runtime itself on first start)
-  4. Run the server:         uvicorn main:app --reload
+  4. Set an API key:         export WRAPPER_API_KEY="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
+  5. Run the server:         uvicorn main:app --reload
 """
 
 import asyncio
 import logging
 import os
 import re
+import secrets
 from contextlib import asynccontextmanager
 from difflib import get_close_matches
 from time import monotonic
 from typing import AsyncGenerator
 
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi.middleware.trustedhost import TrustedHostMiddleware
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, field_validator
+from starlette.datastructures import Headers
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 from copilot import CopilotClient
 from copilot.tools import Tool, ToolInvocation, ToolResult
@@ -86,6 +91,69 @@ class AgentStepResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Access control
+# ---------------------------------------------------------------------------
+
+API_KEY_ENV = "WRAPPER_API_KEY"
+ALLOWED_HOSTS_ENV = "WRAPPER_ALLOWED_HOSTS"
+DEFAULT_ALLOWED_HOSTS = ["localhost", "127.0.0.1"]
+OPEN_PATHS = frozenset({"/health"})
+
+_api_key: bytes | None = None  # stays None until startup loads it, and then every request is refused
+
+
+def _load_api_key() -> bytes:
+    key = os.environ.get(API_KEY_ENV, "").strip()
+    if not key:
+        raise RuntimeError(
+            f"{API_KEY_ENV} must be set. Generate one with: "
+            "python3 -c 'import secrets; print(secrets.token_urlsafe(32))'"
+        )
+    return key.encode()
+
+
+def _allowed_hosts() -> list[str]:
+    hosts = [host.strip() for host in os.environ.get(ALLOWED_HOSTS_ENV, "").split(",") if host.strip()]
+    # A wildcard would let a web page reach this server through DNS rebinding, which is what the allowlist stops.
+    if any("*" in host for host in hosts):
+        raise RuntimeError(f"{ALLOWED_HOSTS_ENV} must list exact hostnames; wildcards are not allowed")
+    return hosts or DEFAULT_ALLOWED_HOSTS
+
+
+def _has_valid_api_key(headers: Headers) -> bool:
+    scheme, _, token = headers.get("authorization", "").partition(" ")
+    if _api_key is None or scheme.lower() != "bearer":
+        return False
+    # Starlette decodes headers as latin-1, so this restores the bytes that were sent. compare_digest raises on a
+    # non-ASCII str, which would turn a bad key into a 500.
+    return secrets.compare_digest(token.encode("latin-1"), _api_key)
+
+
+class RequireApiKey:
+    """Refuses any request without the key unless its path is in OPEN_PATHS.
+
+    Middleware rather than a route dependency, because /docs, /redoc and /openapi.json aren't covered by app-level
+    dependencies, and so that a route added later is protected by default.
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if (
+            scope["type"] in ("http", "websocket")
+            and scope["path"] not in OPEN_PATHS
+            and not _has_valid_api_key(Headers(scope=scope))
+        ):
+            response = JSONResponse(
+                {"detail": "Missing or invalid API key"}, status_code=401, headers={"WWW-Authenticate": "Bearer"}
+            )
+            await response(scope, receive, send)
+            return
+        await self.app(scope, receive, send)
+
+
+# ---------------------------------------------------------------------------
 # Application lifespan – single persistent CopilotClient
 # ---------------------------------------------------------------------------
 
@@ -94,12 +162,15 @@ copilot_client: CopilotClient | None = None
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator:
-    global copilot_client
+    global copilot_client, _api_key
+    _api_key = _load_api_key()  # first, so a missing key stops startup before the runtime is launched
     # "empty" mode: the runtime adds no workspace/environment context or custom instructions to prompts
     # (fewer tokens billed, nothing about this machine is sent). It needs its own data directory.
     home = os.environ.get("COPILOT_WRAPPER_HOME", os.path.expanduser("~/.copilot-fastapi-wrapper"))
     os.makedirs(home, exist_ok=True)
-    copilot_client = CopilotClient(mode="empty", base_directory=home)
+    # The runtime handles untrusted prompt text and has no need for the key.
+    runtime_env = {name: value for name, value in os.environ.items() if name != API_KEY_ENV}
+    copilot_client = CopilotClient(mode="empty", base_directory=home, env=runtime_env)
     await copilot_client.start()
     _reset_model_cache()
     yield
@@ -112,6 +183,9 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan,
 )
+# The last one added runs first, so a foreign Host is refused before the key is looked at.
+app.add_middleware(RequireApiKey)
+app.add_middleware(TrustedHostMiddleware, allowed_hosts=_allowed_hosts())
 
 
 # ---------------------------------------------------------------------------

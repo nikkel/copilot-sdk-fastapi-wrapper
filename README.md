@@ -83,27 +83,55 @@ permission request is refused, so prompts containing untrusted text can't make i
 
 ## Running the Server
 
+The server won't start without an API key. Generate one and start the server in the same shell:
+
 ```bash
+export WRAPPER_API_KEY="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
 uvicorn main:app --reload
 ```
 
-The server starts on **http://localhost:8000**.
+The server starts on **http://localhost:8000**. To keep the same key between shells, save it in a secrets manager or
+a private file that isn't committed, and export it from there. The key is what stops anything else that can reach the
+port from spending your credits, so treat it like a password. To replace it, set a new value and restart the server.
+
+Send the key with every request:
+
+```bash
+curl -s http://localhost:8000/models -H "Authorization: Bearer $WRAPPER_API_KEY"
+```
+
+| Setting | Required | Description |
+|---|---|---|
+| `WRAPPER_API_KEY` | ✅ | The key callers must send as `Authorization: Bearer <key>` |
+| `WRAPPER_ALLOWED_HOSTS` | ❌ | Comma-separated hostnames the server answers to, without ports. Replaces the default `localhost,127.0.0.1`, so list those too if you still need them. Wildcards are refused at startup |
+
+Every request is checked in this order:
+
+| Status | Meaning |
+|---|---|
+| `400` | The `Host` header isn't in `WRAPPER_ALLOWED_HOSTS`. This applies to every path, including `/health`. It stops web pages reaching the server through DNS rebinding |
+| `401` | The key is missing or wrong. This applies to every path except `/health` |
 
 | URL | Description |
 |---|---|
-| http://localhost:8000/docs | **Swagger UI** — interactive API explorer |
-| http://localhost:8000/redoc | ReDoc — alternative docs viewer |
-| http://localhost:8000/openapi.json | Raw OpenAPI schema |
+| http://localhost:8000/docs | **Swagger UI** — interactive API explorer (needs the key) |
+| http://localhost:8000/redoc | ReDoc — alternative docs viewer (needs the key) |
+| http://localhost:8000/openapi.json | Raw OpenAPI schema (needs the key) |
 
 ---
 
 ## Swagger UI (Interactive Docs)
 
-Once the server is running, open **http://localhost:8000/docs** in your browser.
+The docs pages need the key too, and a browser can't send it when you open a page directly, so
+**http://localhost:8000/docs** returns `401` in a normal browser tab. To use them, add an
+`Authorization: Bearer <key>` header with a browser extension that sets request headers, limited to this server so the
+key isn't sent to other sites.
 
-You will see all endpoints listed. Click any endpoint → **"Try it out"** → fill in the request body → **"Execute"** to send a real request and see the live response.
+To read the schema without a browser:
 
-![Swagger UI is available at /docs after starting the server]
+```bash
+curl -s http://localhost:8000/openapi.json -H "Authorization: Bearer $WRAPPER_API_KEY" | python3 -m json.tool
+```
 
 ---
 
@@ -187,6 +215,8 @@ Returns the models advertised by the connected Copilot CLI.
 
 ### `GET /health` — Health check
 
+The only route that needs no API key. The `Host` check still applies.
+
 ```json
 { "status": "ok" }
 ```
@@ -195,12 +225,15 @@ Returns the models advertised by the connected Copilot CLI.
 
 ## Examples
 
+All examples read the key from `WRAPPER_API_KEY`, so set it in the shell that runs them.
+
 ### curl
 
 #### Basic prompt with the default model (`gpt-6-luna`)
 
 ```bash
 curl -s -X POST http://localhost:8000/chat \
+  -H "Authorization: Bearer $WRAPPER_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"prompt": "What is a Python generator?"}'
 ```
@@ -209,6 +242,7 @@ curl -s -X POST http://localhost:8000/chat \
 
 ```bash
 curl -s -X POST http://localhost:8000/chat \
+  -H "Authorization: Bearer $WRAPPER_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
     "prompt": "Write a Python function that flattens a nested list",
@@ -220,6 +254,7 @@ curl -s -X POST http://localhost:8000/chat \
 
 ```bash
 curl -s -N -X POST http://localhost:8000/chat/stream \
+  -H "Authorization: Bearer $WRAPPER_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"prompt": "Explain async/await in Python step by step"}'
 ```
@@ -236,7 +271,7 @@ data: [DONE]
 #### List available models
 
 ```bash
-curl -s http://localhost:8000/models | python3 -m json.tool
+curl -s http://localhost:8000/models -H "Authorization: Bearer $WRAPPER_API_KEY" | python3 -m json.tool
 ```
 
 ---
@@ -246,10 +281,12 @@ curl -s http://localhost:8000/models | python3 -m json.tool
 #### Blocking request
 
 ```python
+import os
 import requests
 
 response = requests.post(
     "http://localhost:8000/chat",
+    headers={"Authorization": f"Bearer {os.environ['WRAPPER_API_KEY']}"},
     json={
         "prompt": "Give me a one-liner to reverse a string in Python",
         "model": "gpt-6-luna",
@@ -261,10 +298,12 @@ print(response.json()["response"])
 #### Using `gpt-5-mini`
 
 ```python
+import os
 import requests
 
 response = requests.post(
     "http://localhost:8000/chat",
+    headers={"Authorization": f"Bearer {os.environ['WRAPPER_API_KEY']}"},
     json={
         "prompt": "Explain the difference between a list and a tuple",
         "model": "gpt-5-mini",
@@ -276,10 +315,12 @@ print(response.json()["response"])
 #### Streaming with `requests`
 
 ```python
+import os
 import requests
 
 with requests.post(
     "http://localhost:8000/chat/stream",
+    headers={"Authorization": f"Bearer {os.environ['WRAPPER_API_KEY']}"},
     json={"prompt": "Write a haiku about Python", "model": "gpt-6-luna"},
     stream=True,
 ) as r:
@@ -298,13 +339,17 @@ print()
 
 ```python
 import asyncio
+import os
 import httpx
+
+HEADERS = {"Authorization": f"Bearer {os.environ['WRAPPER_API_KEY']}"}
 
 
 async def ask(prompt: str, model: str = "gpt-6-luna") -> str:
     async with httpx.AsyncClient(timeout=60) as client:
         r = await client.post(
             "http://localhost:8000/chat",
+            headers=HEADERS,
             json={"prompt": prompt, "model": model},
         )
         r.raise_for_status()
@@ -316,6 +361,7 @@ async def stream(prompt: str, model: str = "gpt-5-mini") -> None:
         async with client.stream(
             "POST",
             "http://localhost:8000/chat/stream",
+            headers=HEADERS,
             json={"prompt": prompt, "model": model},
         ) as r:
             async for line in r.aiter_lines():
@@ -340,7 +386,10 @@ asyncio.run(stream("Count to 5 and explain each number"))
 ```js
 const res = await fetch("http://localhost:8000/chat", {
   method: "POST",
-  headers: { "Content-Type": "application/json" },
+  headers: {
+    Authorization: `Bearer ${process.env.WRAPPER_API_KEY}`,
+    "Content-Type": "application/json",
+  },
   body: JSON.stringify({
     prompt: "What is the event loop in JavaScript?",
     model: "gpt-6-luna",
@@ -350,13 +399,16 @@ const data = await res.json();
 console.log(data.response);
 ```
 
-#### Streaming with `EventSource` (browser)
+#### Streaming with `fetch`
 
 ```js
 // POST streaming via fetch + ReadableStream
 const response = await fetch("http://localhost:8000/chat/stream", {
   method: "POST",
-  headers: { "Content-Type": "application/json" },
+  headers: {
+    Authorization: `Bearer ${process.env.WRAPPER_API_KEY}`,
+    "Content-Type": "application/json",
+  },
   body: JSON.stringify({ prompt: "Tell me a short joke", model: "gpt-5-mini" }),
 });
 
@@ -408,6 +460,9 @@ uv pip compile requirements-dev.txt -c requirements.lock --universal --python-ve
 | Error | Fix |
 |---|---|
 | `gh: command not found` | Install GitHub CLI: `brew install gh` |
+| `RuntimeError: WRAPPER_API_KEY must be set` | Generate and export a key: see [Running the Server](#running-the-server) |
+| `401 Missing or invalid API key` | Send `Authorization: Bearer <key>` with the key the server was started with |
+| `400 Invalid host header` | Call the server as `localhost` or `127.0.0.1`, or add the hostname to `WRAPPER_ALLOWED_HOSTS` |
 | First start is slow | The SDK is downloading the Copilot CLI runtime once; later starts use the cache |
 | `503 Copilot client not ready` | The server is still starting up — wait a moment and retry |
 | `503 Could not fetch the Copilot model list` | Check the network and `gh auth login`, then retry; the server log has the cause |

@@ -12,6 +12,7 @@ from copilot.generated.rpc import ServerRpc
 from fastapi.testclient import TestClient
 
 import main
+from conftest import API_KEY
 
 TOOLS = [{"type": "function", "function": {"name": "search"}}]
 ROUTES = [
@@ -110,8 +111,11 @@ def test_empty_model_list_returns_503_and_never_creates_a_session(client, fake_c
 
 
 @all_routes
-def test_client_not_started_returns_503(path, extra):
-    response = post(TestClient(main.app), path, extra, "gpt-6-luna")
+def test_client_not_started_returns_503(monkeypatch, path, extra):
+    monkeypatch.setattr(main, "_api_key", API_KEY.encode())
+    unstarted = TestClient(main.app, base_url="http://localhost", headers={"Authorization": f"Bearer {API_KEY}"})
+
+    response = post(unstarted, path, extra, "gpt-6-luna")
 
     assert response.status_code == 503
 
@@ -173,7 +177,8 @@ def test_model_removed_upstream_is_rejected_after_the_cache_expires(client, fake
 def test_concurrent_requests_on_a_cold_cache_fetch_once(client, fake_copilot):
     async def send_together() -> list[int]:
         transport = httpx.ASGITransport(app=main.app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as http:
+        headers = {"Authorization": f"Bearer {API_KEY}"}
+        async with httpx.AsyncClient(transport=transport, base_url="http://localhost", headers=headers) as http:
             responses = await asyncio.gather(
                 *(http.post("/chat", json={"prompt": "hi", "model": "gpt-6-luna"}) for _ in range(5))
             )
