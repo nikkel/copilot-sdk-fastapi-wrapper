@@ -23,6 +23,15 @@ Cheapest models available to this account (checked 2026-10-15 via `GET /models`)
 A short prompt costs a tiny fraction of a credit with `gpt-6-luna`. `GET /models` lists what your plan offers;
 model availability and prices change, so check the pricing page above.
 
+`/chat`, `/chat/stream` and `/agent/step` only accept models your account lists (checked against a list refreshed
+every 5 minutes), because Copilot would otherwise silently answer an unknown model with a different, possibly
+pricier one. `auto` works if your account lists it.
+
+| Status | Meaning |
+|---|---|
+| `422` | Unknown model. `detail.valid_models` has up to 10 valid IDs, closest match first; no session is created |
+| `503` | The model list couldn't be fetched, so the request wasn't sent |
+
 ---
 
 ## Prerequisites
@@ -51,14 +60,15 @@ Requires **Python 3.11+**.
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
+pip install --require-hashes -r requirements.lock
 ```
 
 Use a virtual environment: an older `github-copilot-sdk` (0.x) installed globally makes `main.py` fail with
 `ImportError: cannot import name 'PermissionDecisionReject'`.
 
-`requirements.txt` installs:
-- `github-copilot-sdk` 1.x (≥ 1.0.22) — Python SDK that runs and talks to the Copilot CLI runtime
+`requirements.lock` holds the exact version and hashes of every package, so an install can't differ from what was
+tested. It's generated from the direct dependencies in `requirements.txt`:
+- `github-copilot-sdk` 1.0.22, pinned because model validation uses its experimental `rpc.models` API — Python SDK that runs and talks to the Copilot CLI runtime
 - `fastapi` (≥ 0.143.2) — web framework
 - `uvicorn[standard]` (≥ 0.54.0) — ASGI server
 - `pydantic` (≥ 2.14.1) — request/response models
@@ -156,6 +166,8 @@ ends, and the calls are returned for your app to run. Send the results back in t
 
 Response: `{"content": "…", "tool_calls": [{"name": "search", "arguments": {"query": "…"}}], "model": "gpt-6-luna"}`.
 An empty `tool_calls` means the model answered in `content`.
+
+Tool names must be 1-64 letters, digits, underscores or hyphens; anything else returns `422` and no session is created.
 
 ---
 
@@ -367,6 +379,30 @@ while (true) {
 
 ---
 
+## Tests
+
+The tests use a fake SDK client: they don't start the Copilot runtime or spend credits.
+
+```bash
+pip install --require-hashes -r requirements-dev.lock
+python -m pytest
+```
+
+---
+
+## Updating dependencies
+
+Edit `requirements.txt` or `requirements-dev.txt`, regenerate both locks with [uv](https://docs.astral.sh/uv/), then run
+the tests. Review which packages changed before committing. To move to newer versions of everything, add `--upgrade`
+to both commands.
+
+```bash
+uv pip compile requirements.txt --universal --python-version 3.11 --generate-hashes -o requirements.lock
+uv pip compile requirements-dev.txt -c requirements.lock --universal --python-version 3.11 --generate-hashes -o requirements-dev.lock
+```
+
+---
+
 ## Troubleshooting
 
 | Error | Fix |
@@ -374,7 +410,9 @@ while (true) {
 | `gh: command not found` | Install GitHub CLI: `brew install gh` |
 | First start is slow | The SDK is downloading the Copilot CLI runtime once; later starts use the cache |
 | `503 Copilot client not ready` | The server is still starting up — wait a moment and retry |
-| `ModuleNotFoundError: No module named 'copilot'` | Run `pip install -r requirements.txt` |
-| `ImportError: cannot import name 'PermissionDecisionReject'` | An old SDK is installed: activate `.venv` (or `pip install -r requirements.txt` in it) |
+| `503 Could not fetch the Copilot model list` | Check the network and `gh auth login`, then retry; the server log has the cause |
+| `422` with `valid_models` | The model ID isn't available to your account: use one from `detail.valid_models` or `GET /models` |
+| `ModuleNotFoundError: No module named 'copilot'` | Run `pip install --require-hashes -r requirements.lock` |
+| `ImportError: cannot import name 'PermissionDecisionReject'` | An old SDK is installed: activate `.venv` (or `pip install --require-hashes -r requirements.lock` in it) |
 | Startup fails with `IncompleteRead` while downloading the CLI runtime | Network dropped during the one-time 81 MB download: start again |
 | Server starts but returns errors | Make sure `gh auth login` has been completed and your account has an active Copilot subscription |
