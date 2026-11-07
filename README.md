@@ -94,7 +94,7 @@ The server won't start without an API key. Generate one and start the server in 
 
 ```bash
 export WRAPPER_API_KEY="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
-uvicorn main:app --reload
+uvicorn main:app --reload --timeout-graceful-shutdown 10
 ```
 
 The server starts on **http://localhost:8000**. To keep the same key between shells, save it in a secrets manager or
@@ -119,6 +119,11 @@ Every request is checked in this order:
 |---|---|
 | `400` | The `Host` header isn't in `WRAPPER_ALLOWED_HOSTS`. This applies to every path, including `/health`. It stops web pages reaching the server through DNS rebinding |
 | `401` | The key is missing or wrong. This applies to every path except `/health` |
+
+`--timeout-graceful-shutdown 10` makes the server cancel any turn still running 10 seconds after it's told to stop.
+Without it, a stalled turn delays shutdown until `COPILOT_REQUEST_TIMEOUT` ends the turn.
+
+If a client disconnects, its turn is aborted and its session closed, so an abandoned request stops spending.
 
 | URL | Description |
 |---|---|

@@ -30,12 +30,14 @@ class FakeSession:
         await self.disconnect()
 
     async def disconnect(self) -> None:
+        await asyncio.sleep(0)  # a real round trip, so a cancellation still being delivered would interrupt this
         await self.client.maybe_stall("disconnect")
         if self.client.disconnect_error is not None:
             raise self.client.disconnect_error
         self.client.sessions_closed += 1
 
     async def abort(self) -> None:
+        await asyncio.sleep(0)
         self.client.turns_aborted += 1
         await self.client.maybe_stall("abort")
 
