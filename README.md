@@ -23,6 +23,15 @@ Cheapest models available to this account (checked 2026-10-15 via `GET /models`)
 A short prompt costs a tiny fraction of a credit with `gpt-6-luna`. `GET /models` lists what your plan offers;
 model availability and prices change, so check the pricing page above.
 
+`/chat`, `/chat/stream` and `/agent/step` only accept models your account lists (checked against a list refreshed
+every 5 minutes), because Copilot would otherwise silently answer an unknown model with a different, possibly
+pricier one. `auto` works if your account lists it.
+
+| Status | Meaning |
+|---|---|
+| `422` | Unknown model. `detail.valid_models` has up to 10 valid IDs, closest match first; no session is created |
+| `503` | The model list couldn't be fetched, so the request wasn't sent |
+
 ---
 
 ## Prerequisites
@@ -367,6 +376,17 @@ while (true) {
 
 ---
 
+## Tests
+
+The tests use a fake SDK client: they don't start the Copilot runtime or spend credits.
+
+```bash
+pip install -r requirements-dev.txt
+python -m pytest
+```
+
+---
+
 ## Troubleshooting
 
 | Error | Fix |
@@ -374,6 +394,8 @@ while (true) {
 | `gh: command not found` | Install GitHub CLI: `brew install gh` |
 | First start is slow | The SDK is downloading the Copilot CLI runtime once; later starts use the cache |
 | `503 Copilot client not ready` | The server is still starting up — wait a moment and retry |
+| `503 Could not fetch the Copilot model list` | Check the network and `gh auth login`, then retry; the server log has the cause |
+| `422` with `valid_models` | The model ID isn't available to your account: use one from `detail.valid_models` or `GET /models` |
 | `ModuleNotFoundError: No module named 'copilot'` | Run `pip install -r requirements.txt` |
 | `ImportError: cannot import name 'PermissionDecisionReject'` | An old SDK is installed: activate `.venv` (or `pip install -r requirements.txt` in it) |
 | Startup fails with `IncompleteRead` while downloading the CLI runtime | Network dropped during the one-time 81 MB download: start again |
