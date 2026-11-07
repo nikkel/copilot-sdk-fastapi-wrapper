@@ -111,6 +111,10 @@ curl -s http://localhost:8000/models -H "Authorization: Bearer $WRAPPER_API_KEY"
 |---|---|---|
 | `WRAPPER_API_KEY` | ✅ | The key callers must send as `Authorization: Bearer <key>` |
 | `COPILOT_REQUEST_TIMEOUT` | ❌ | Time limit in seconds for each model turn, from opening the session to the end of the reply. Default `120`. The server won't start if it isn't a positive number |
+| `COPILOT_MAX_PROMPT_CHARS` | ❌ | Longest `prompt` accepted, in characters. Default `1000000` |
+| `COPILOT_MAX_SYSTEM_CHARS` | ❌ | Longest `system` accepted, in characters. Default `1000000` |
+| `COPILOT_MAX_TOOLS` | ❌ | Most `tools` accepted by `/agent/step`. Default `128` |
+| `COPILOT_MAX_CONCURRENT_SESSIONS` | ❌ | Most requests with a session open at once, across all routes. Default `20` |
 | `WRAPPER_ALLOWED_HOSTS` | ❌ | Comma-separated hostnames the server answers to, without ports. Replaces the default `localhost,127.0.0.1`, so list those too if you still need them. Wildcards are refused at startup |
 
 Every request is checked in this order:
@@ -119,6 +123,16 @@ Every request is checked in this order:
 |---|---|
 | `400` | The `Host` header isn't in `WRAPPER_ALLOWED_HOSTS`. This applies to every path, including `/health`. It stops web pages reaching the server through DNS rebinding |
 | `401` | The key is missing or wrong. This applies to every path except `/health` |
+
+The server won't start if a limit above isn't a positive whole number. Each limit refuses a request before a session
+opens, so a refused request spends nothing:
+
+| Status | Meaning |
+|---|---|
+| `422` | `prompt` or `system` is too long, or there are too many `tools` |
+| `429` | Every session slot is taken. The `Retry-After` header says how many seconds to wait |
+
+These limits don't restrict which model a caller chooses, and a caller can still pick the most expensive one listed.
 
 `--timeout-graceful-shutdown 10` makes the server cancel any turn still running 10 seconds after it's told to stop.
 Without it, a stalled turn delays shutdown until `COPILOT_REQUEST_TIMEOUT` ends the turn.
@@ -533,6 +547,7 @@ uv pip compile requirements-dev.txt -c requirements.lock --universal --python-ve
 | `503 Copilot client not ready` | The server is still starting up — wait a moment and retry |
 | `503 Could not fetch the Copilot model list` | Check the network and `gh auth login`, then retry; the server log has the cause |
 | `422` with `prompt must not start with /` | Start the prompt with words instead of `/`, even if it's a file path. Leading whitespace and invisible characters don't count |
+| `429 Too many concurrent sessions` | Wait for `Retry-After` seconds, or raise `COPILOT_MAX_CONCURRENT_SESSIONS` |
 | `504 Copilot did not finish in time` | Retry, or raise `COPILOT_REQUEST_TIMEOUT` for long replies |
 | `RuntimeError: COPILOT_REQUEST_TIMEOUT must be a positive number of seconds` | Set it to a number above 0, or unset it to use the default of 120 |
 | `502 Copilot failed to complete the request` | The server log has the cause, for example an empty reply or a `reasoning_effort` the model doesn't support |

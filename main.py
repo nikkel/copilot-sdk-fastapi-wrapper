@@ -42,6 +42,30 @@ logger = logging.getLogger(__name__)
 # Request / response models
 # ---------------------------------------------------------------------------
 
+# Generous defaults: each is there to stop abuse, not to shape normal use. Startup replaces them from the environment.
+DEFAULT_MAX_PROMPT_CHARS = 1_000_000
+DEFAULT_MAX_SYSTEM_CHARS = 1_000_000
+DEFAULT_MAX_TOOLS = 128
+DEFAULT_MAX_CONCURRENT_SESSIONS = 20
+
+_max_prompt_chars = DEFAULT_MAX_PROMPT_CHARS
+_max_system_chars = DEFAULT_MAX_SYSTEM_CHARS
+_max_tools = DEFAULT_MAX_TOOLS
+_max_concurrent_sessions = DEFAULT_MAX_CONCURRENT_SESSIONS
+
+
+def _prompt_within_limit(prompt: str) -> str:
+    if len(prompt) > _max_prompt_chars:
+        raise ValueError(f"prompt must be at most {_max_prompt_chars} characters")
+    return prompt
+
+
+def _system_within_limit(system: str | None) -> str | None:
+    if system is not None and len(system) > _max_system_chars:
+        raise ValueError(f"system must be at most {_max_system_chars} characters")
+    return system
+
+
 def _not_a_slash_command(prompt: str) -> str:
     """Prompts can carry untrusted text, and the runtime has commands such as /allow-all. Whether session.send would
     act on one is untested, so a prompt that could be read as a command never reaches a session."""
@@ -57,7 +81,8 @@ def _not_a_slash_command(prompt: str) -> str:
     return prompt
 
 
-Prompt = Annotated[str, AfterValidator(_not_a_slash_command)]
+Prompt = Annotated[str, AfterValidator(_prompt_within_limit), AfterValidator(_not_a_slash_command)]
+SystemPrompt = Annotated[str | None, AfterValidator(_system_within_limit)]
 
 
 class PromptRequest(BaseModel):
@@ -66,7 +91,7 @@ class PromptRequest(BaseModel):
     reasoning_effort: ReasoningEffort | None = None
     # Replaces Copilot's built-in (coding-agent) system prompt entirely: fewer tokens, and the model follows
     # your instructions instead of acting as a coding assistant.
-    system: str | None = None
+    system: SystemPrompt = None
 
 
 class ChatResponse(BaseModel):
@@ -95,10 +120,17 @@ class ToolSpec(BaseModel):
 
 class AgentStepRequest(BaseModel):
     prompt: Prompt
-    system: str | None = None
+    system: SystemPrompt = None
     tools: list[ToolSpec] = []
     model: str = "gpt-6-luna"
     reasoning_effort: ReasoningEffort | None = None
+
+    @field_validator("tools")
+    @classmethod
+    def _tools_within_limit(cls, tools: list[ToolSpec]) -> list[ToolSpec]:
+        if len(tools) > _max_tools:
+            raise ValueError(f"tools must have at most {_max_tools} entries")
+        return tools
 
 
 class ToolCall(BaseModel):
@@ -200,6 +232,19 @@ def _load_request_timeout() -> float:
     return seconds
 
 
+def _load_positive_int(name: str, default: int) -> int:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    try:
+        number = int(value)
+    except ValueError:
+        number = 0
+    if number <= 0:
+        raise RuntimeError(f"{name} must be a positive whole number")
+    return number
+
+
 # ---------------------------------------------------------------------------
 # Application lifespan – single persistent CopilotClient
 # ---------------------------------------------------------------------------
@@ -210,8 +255,13 @@ copilot_client: CopilotClient | None = None
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator:
     global copilot_client, _api_key, _request_timeout_seconds
+    global _max_prompt_chars, _max_system_chars, _max_tools, _max_concurrent_sessions
     _api_key = _load_api_key()  # first, so a missing key stops startup before the runtime is launched
     _request_timeout_seconds = _load_request_timeout()
+    _max_prompt_chars = _load_positive_int("COPILOT_MAX_PROMPT_CHARS", DEFAULT_MAX_PROMPT_CHARS)
+    _max_system_chars = _load_positive_int("COPILOT_MAX_SYSTEM_CHARS", DEFAULT_MAX_SYSTEM_CHARS)
+    _max_tools = _load_positive_int("COPILOT_MAX_TOOLS", DEFAULT_MAX_TOOLS)
+    _max_concurrent_sessions = _load_positive_int("COPILOT_MAX_CONCURRENT_SESSIONS", DEFAULT_MAX_CONCURRENT_SESSIONS)
     # "empty" mode: the runtime adds no workspace/environment context or custom instructions to prompts
     # (fewer tokens billed, nothing about this machine is sent). It needs its own data directory.
     home = os.environ.get("COPILOT_WRAPPER_HOME", os.path.expanduser("~/.copilot-fastapi-wrapper"))
@@ -431,6 +481,41 @@ async def _until_client_disconnects(request: Request, turn: Coroutine):
             await asyncio.gather(turn_task, return_exceptions=True)
 
 
+SESSION_RETRY_AFTER_SECONDS = 5
+
+_sessions_in_use = 0
+
+
+def _take_session_slot() -> None:
+    """Call before opening a session, and pair with _free_session_slot. Raises 429 when every slot is taken."""
+    global _sessions_in_use
+    if _sessions_in_use >= _max_concurrent_sessions:
+        raise HTTPException(
+            status_code=429,
+            detail="Too many concurrent sessions",
+            headers={"Retry-After": str(SESSION_RETRY_AFTER_SECONDS)},
+        )
+    _sessions_in_use += 1
+
+
+def _free_session_slot() -> None:
+    global _sessions_in_use
+    _sessions_in_use -= 1
+
+
+class _SessionStreamingResponse(StreamingResponse):
+    """Holds a session slot for the life of the stream, including when the client leaves before the stream starts."""
+
+    async def __call__(self, scope, receive, send) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            try:
+                await self.body_iterator.aclose()  # a stream cancelled at a yield would otherwise wait for collection
+            finally:
+                _free_session_slot()
+
+
 async def _send_prompt(prompt: str, model: str, reasoning_effort: str | None, system: str | None = None) -> str:
     """Open a single-use session, send *prompt*, collect the full reply."""
     if copilot_client is None:
@@ -621,7 +706,11 @@ async def agent_step(req: AgentStepRequest, request: Request) -> AgentStepRespon
     send the next step with their results in the prompt.
     """
     await _require_known_model(req.model)
-    return await _until_client_disconnects(request, _agent_step(req))
+    _take_session_slot()
+    try:
+        return await _until_client_disconnects(request, _agent_step(req))
+    finally:
+        _free_session_slot()
 
 
 @app.post("/chat", response_model=ChatResponse, summary="Send a prompt (blocking)")
@@ -631,9 +720,13 @@ async def chat(req: PromptRequest, request: Request) -> ChatResponse:
     Blocks until the model finishes generating.
     """
     await _require_known_model(req.model)
-    response = await _until_client_disconnects(
-        request, _send_prompt(req.prompt, req.model, req.reasoning_effort, req.system)
-    )
+    _take_session_slot()
+    try:
+        response = await _until_client_disconnects(
+            request, _send_prompt(req.prompt, req.model, req.reasoning_effort, req.system)
+        )
+    finally:
+        _free_session_slot()
     return ChatResponse(response=response, model=req.model)
 
 
@@ -646,7 +739,8 @@ async def chat_stream(req: PromptRequest) -> StreamingResponse:
     A successful stream ends with `data: [DONE]`. A failed one ends with an `error` event and no `[DONE]`.
     """
     await _require_known_model(req.model)  # before the response starts, so errors are real HTTP status codes
-    return StreamingResponse(
+    _take_session_slot()
+    return _SessionStreamingResponse(
         _stream_prompt(req.prompt, req.model, req.reasoning_effort, req.system),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
