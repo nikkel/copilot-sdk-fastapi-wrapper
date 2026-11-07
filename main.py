@@ -15,10 +15,12 @@ import logging
 import os
 import re
 import secrets
+import unicodedata
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from difflib import get_close_matches
 from time import monotonic
+from typing import Annotated
 
 from copilot import CopilotClient
 from copilot.generated.rpc import ModelsListRequest, PermissionDecisionReject
@@ -26,7 +28,7 @@ from copilot.tools import Tool, ToolInvocation, ToolResult
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
-from pydantic import BaseModel, field_validator
+from pydantic import AfterValidator, BaseModel, field_validator
 from starlette.datastructures import Headers
 from starlette.types import ASGIApp, Receive, Scope, Send
 
@@ -37,8 +39,26 @@ logger = logging.getLogger(__name__)
 # Request / response models
 # ---------------------------------------------------------------------------
 
+def _not_a_slash_command(prompt: str) -> str:
+    """Prompts can carry untrusted text, and the runtime has commands such as /allow-all. Whether session.send would
+    act on one is untested, so a prompt that could be read as a command never reaches a session."""
+    for char in prompt:
+        if char.isspace() or unicodedata.category(char) == "Cf":  # Cf: zero-width characters, byte order mark, ...
+            continue
+        if char == "/":
+            raise ValueError(
+                "prompt must not start with /, ignoring leading whitespace and invisible characters, "
+                "because the Copilot runtime may read it as a slash command"
+            )
+        break
+    return prompt
+
+
+Prompt = Annotated[str, AfterValidator(_not_a_slash_command)]
+
+
 class PromptRequest(BaseModel):
-    prompt: str
+    prompt: Prompt
     model: str = "gpt-6-luna"  # cheapest non-Claude model on Copilot (2026-10)
     reasoning_effort: str | None = None  # "low" | "medium" | "high" | "xhigh"
     # Replaces Copilot's built-in (coding-agent) system prompt entirely: fewer tokens, and the model follows
@@ -71,7 +91,7 @@ class ToolSpec(BaseModel):
 
 
 class AgentStepRequest(BaseModel):
-    prompt: str
+    prompt: Prompt
     system: str | None = None
     tools: list[ToolSpec] = []
     model: str = "gpt-6-luna"

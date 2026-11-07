@@ -160,10 +160,15 @@ Returns the full response once the model has finished generating.
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| `prompt` | string | ✅ | The message to send to Copilot |
+| `prompt` | string | ✅ | The message to send to Copilot. Can't start with `/`, even after whitespace or invisible characters |
 | `model` | string | ❌ | Model ID (default: `gpt-6-luna`) |
 | `reasoning_effort` | string \| null | ❌ | `"low"` / `"medium"` / `"high"` / `"xhigh"` — only for models that support reasoning |
 | `system` | string \| null | ❌ | Your own system prompt; **replaces** Copilot's built-in one (fewer tokens, follows your instructions) |
+
+A prompt that starts with `/` returns `422` on `/chat`, `/chat/stream` and `/agent/step`, and no session is created,
+because the Copilot runtime may read it as a slash command. Leading whitespace and invisible format characters (Unicode
+category Cf, such as zero-width characters and the byte order mark) are ignored when finding the first character. To
+ask about something like a file path, put words before it. A `/` later in the prompt is accepted.
 
 **Response:**
 
@@ -479,6 +484,7 @@ uv pip compile requirements-dev.txt -c requirements.lock --universal --python-ve
 | First start is slow | The SDK is downloading the Copilot CLI runtime once; later starts use the cache |
 | `503 Copilot client not ready` | The server is still starting up — wait a moment and retry |
 | `503 Could not fetch the Copilot model list` | Check the network and `gh auth login`, then retry; the server log has the cause |
+| `422` with `prompt must not start with /` | Start the prompt with words instead of `/`, even if it's a file path. Leading whitespace and invisible characters don't count |
 | `422` with `valid_models` | The model ID isn't available to your account: use one from `detail.valid_models` or `GET /models` |
 | `ModuleNotFoundError: No module named 'copilot'` | Run `pip install --require-hashes -r requirements.lock` |
 | `ImportError: cannot import name 'PermissionDecisionReject'` | An old SDK is installed: activate `.venv` (or `pip install --require-hashes -r requirements.lock` in it) |
