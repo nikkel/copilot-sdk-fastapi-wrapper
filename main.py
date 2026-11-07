@@ -317,6 +317,7 @@ SAFE_SESSION = {"on_permission_request": deny_all, "available_tools": []}
 
 # The runtime's error text stays in the server log, because it can hold internal details.
 UPSTREAM_FAILURE_MESSAGE = "Copilot failed to complete the request"
+EMPTY_REPLY = "empty reply"
 TIMEOUT_MESSAGE = "Copilot did not finish in time"
 
 
@@ -420,7 +421,10 @@ async def _send_prompt(prompt: str, model: str, reasoning_effort: str | None, sy
 
     if errors:
         raise _upstream_failure(errors[-1])
-    return "".join(reply_parts)
+    reply = "".join(reply_parts)
+    if not reply.strip():
+        raise _upstream_failure(EMPTY_REPLY)
+    return reply
 
 
 async def _stream_prompt(
@@ -436,6 +440,7 @@ async def _stream_prompt(
     done = asyncio.Event()
     chunk_queue: asyncio.Queue[str | None] = asyncio.Queue()
     errors: list[str] = []
+    received_chunk = False
     deadline = _turn_deadline()
 
     # The 200 status has already been sent by the time anything here fails, so failures are reported in the stream.
@@ -464,6 +469,7 @@ async def _stream_prompt(
                     chunk = await chunk_queue.get()
                 if chunk is None:
                     break
+                received_chunk = True
                 # Encoded, so that text in a chunk can't forge an SSE field or a [DONE]
                 yield f"data: {json.dumps({'delta': chunk})}\n\n"
     except TimeoutError:
@@ -475,8 +481,8 @@ async def _stream_prompt(
         yield _sse_error(UPSTREAM_FAILURE_MESSAGE)
         return
 
-    if errors:
-        _log_upstream_failure(errors[-1])
+    if errors or not received_chunk:
+        _log_upstream_failure(errors[-1] if errors else EMPTY_REPLY)
         yield _sse_error(UPSTREAM_FAILURE_MESSAGE)
         return
 
@@ -555,7 +561,10 @@ async def _agent_step(req: AgentStepRequest) -> AgentStepResponse:
         failed = True
     if failed and not calls:
         raise HTTPException(status_code=502, detail=UPSTREAM_FAILURE_MESSAGE)
-    return AgentStepResponse(content="".join(reply_parts).strip(), tool_calls=calls, model=req.model, incomplete=failed)
+    content = "".join(reply_parts).strip()
+    if not content and not calls:
+        raise _upstream_failure(EMPTY_REPLY)
+    return AgentStepResponse(content=content, tool_calls=calls, model=req.model, incomplete=failed)
 
 
 @app.post("/agent/step", response_model=AgentStepResponse, summary="One step of an agent (native tool calling)")
