@@ -2,6 +2,7 @@
 
 import asyncio
 from types import SimpleNamespace
+from typing import Self
 
 import pytest
 from fastapi.testclient import TestClient
@@ -20,7 +21,7 @@ class FakeSession:
         self.streaming = streaming
         self.handlers = []
 
-    async def __aenter__(self) -> "FakeSession":
+    async def __aenter__(self) -> Self:
         return self
 
     async def __aexit__(self, *exc) -> None:

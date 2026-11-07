@@ -8,11 +8,11 @@ from types import SimpleNamespace
 
 import httpx
 import pytest
+from conftest import API_KEY
 from copilot.generated.rpc import ServerRpc
 from fastapi.testclient import TestClient
 
 import main
-from conftest import API_KEY
 
 TOOLS = [{"type": "function", "function": {"name": "search"}}]
 ROUTES = [

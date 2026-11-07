@@ -15,21 +15,20 @@ import logging
 import os
 import re
 import secrets
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from difflib import get_close_matches
 from time import monotonic
-from typing import AsyncGenerator
 
+from copilot import CopilotClient
+from copilot.generated.rpc import ModelsListRequest, PermissionDecisionReject
+from copilot.tools import Tool, ToolInvocation, ToolResult
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, field_validator
 from starlette.datastructures import Headers
 from starlette.types import ASGIApp, Receive, Scope, Send
-
-from copilot import CopilotClient
-from copilot.tools import Tool, ToolInvocation, ToolResult
-from copilot.generated.rpc import ModelsListRequest, PermissionDecisionReject
 
 logger = logging.getLogger(__name__)
 
