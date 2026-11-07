@@ -22,7 +22,7 @@ from collections.abc import AsyncGenerator, AsyncIterator, Coroutine
 from contextlib import asynccontextmanager
 from difflib import get_close_matches
 from time import monotonic
-from typing import Annotated
+from typing import Annotated, Literal
 
 from copilot import CopilotClient
 from copilot.generated.rpc import ModelsListRequest, PermissionDecisionReject
@@ -55,6 +55,8 @@ _max_concurrent_sessions = DEFAULT_MAX_CONCURRENT_SESSIONS
 
 
 def _prompt_within_limit(prompt: str) -> str:
+    if not prompt:
+        raise ValueError("prompt must not be empty")
     if len(prompt) > _max_prompt_chars:
         raise ValueError(f"prompt must be at most {_max_prompt_chars} characters")
     return prompt
@@ -104,18 +106,23 @@ class ChatResponse(BaseModel):
 TOOL_NAME = re.compile(r"[a-zA-Z0-9_-]{1,64}")
 
 
+class ToolFunction(BaseModel):
+    name: str
+    description: str = ""
+    parameters: dict | None = None  # a JSON schema object
+
+    @field_validator("name")
+    @classmethod
+    def _name_is_plain(cls, name: str) -> str:
+        if not TOOL_NAME.fullmatch(name):
+            raise ValueError("name must be 1-64 letters, digits, underscores or hyphens")
+        return name
+
+
 class ToolSpec(BaseModel):
     """A tool the CALLER implements (OpenAI/Ollama function format: {"type": "function", "function": {...}})."""
-    type: str = "function"
-    function: dict
-
-    @field_validator("function")
-    @classmethod
-    def _name_is_plain(cls, function: dict) -> dict:
-        name = function.get("name")
-        if not isinstance(name, str) or not TOOL_NAME.fullmatch(name):
-            raise ValueError("function.name must be 1-64 letters, digits, underscores or hyphens")
-        return function
+    type: Literal["function"] = "function"
+    function: ToolFunction
 
 
 class AgentStepRequest(BaseModel):
@@ -127,9 +134,12 @@ class AgentStepRequest(BaseModel):
 
     @field_validator("tools")
     @classmethod
-    def _tools_within_limit(cls, tools: list[ToolSpec]) -> list[ToolSpec]:
+    def _tools_are_valid(cls, tools: list[ToolSpec]) -> list[ToolSpec]:
         if len(tools) > _max_tools:
             raise ValueError(f"tools must have at most {_max_tools} entries")
+        names = [tool.function.name for tool in tools]
+        if len(set(names)) != len(names):
+            raise ValueError("tools must not have duplicate names")
         return tools
 
 
@@ -636,8 +646,8 @@ def _capturing_tools(specs: list[ToolSpec], calls: list[ToolCall]) -> list[Tool]
     tools = []
     for spec in specs:
         fn = spec.function
-        tools.append(Tool(name=fn["name"], description=fn.get("description", ""), handler=capture,
-                          parameters=fn.get("parameters") or {"type": "object", "properties": {}},
+        tools.append(Tool(name=fn.name, description=fn.description, handler=capture,
+                          parameters=fn.parameters or {"type": "object", "properties": {}},
                           skip_permission=True, is_terminal=True,
                           overrides_built_in_tool=True))  # e.g. web_fetch: the caller's version wins
     return tools
