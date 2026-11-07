@@ -464,8 +464,8 @@ async def _stream_prompt(
                     chunk = await chunk_queue.get()
                 if chunk is None:
                     break
-                # Server-Sent Event format
-                yield f"data: {chunk}\n\n"
+                # Encoded, so that text in a chunk can't forge an SSE field or a [DONE]
+                yield f"data: {json.dumps({'delta': chunk})}\n\n"
     except TimeoutError:
         _log_turn_timeout()
         yield _sse_error(TIMEOUT_MESSAGE)
@@ -585,7 +585,7 @@ async def chat_stream(req: PromptRequest) -> StreamingResponse:
     """
     Send a prompt and receive the response as a stream of Server-Sent Events.
 
-    Each event has the form `data: <chunk>`.
+    Each event has the form `data: {"delta": "<chunk>"}`.
     A successful stream ends with `data: [DONE]`. A failed one ends with an `error` event and no `[DONE]`.
     """
     await _require_known_model(req.model)  # before the response starts, so errors are real HTTP status codes
