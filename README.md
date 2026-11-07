@@ -565,3 +565,9 @@ uv pip compile requirements-dev.txt -c requirements.lock --universal --python-ve
 | `ImportError: cannot import name 'PermissionDecisionReject'` | An old SDK is installed: activate `.venv` (or `pip install --require-hashes -r requirements.lock` in it) |
 | Startup fails with `IncompleteRead` while downloading the CLI runtime | Network dropped during the one-time 81 MB download: start again |
 | Server starts but returns errors | Make sure `gh auth login` has been completed and your account has an active Copilot subscription |
+
+---
+
+## License
+
+[MIT](LICENSE)
