@@ -180,7 +180,7 @@ Returns the full response once the model has finished generating.
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| `prompt` | string | ✅ | The message to send to Copilot. Can't start with `/`, even after whitespace or invisible characters |
+| `prompt` | string | ✅ | The message to send to Copilot. Can't be empty or start with `/`, even after whitespace or invisible characters |
 | `model` | string | ❌ | Model ID (default: `gpt-6-luna`) |
 | `reasoning_effort` | string \| null | ❌ | `"low"` / `"medium"` / `"high"` / `"xhigh"` / `"max"` — any other value returns `422`. Only for models that support reasoning, and which levels work depends on the model |
 | `system` | string \| null | ❌ | Your own system prompt; **replaces** Copilot's built-in one (fewer tokens, follows your instructions) |
@@ -255,7 +255,9 @@ If Copilot fails or times out after recording a tool call, the step returns `200
 failed turn and review the calls before running them**: later calls may be missing, and `content` may be cut off.
 `incomplete` is `false` on a normal response. With no tool call recorded, a failure returns `502` and a timeout `504`.
 
-Tool names must be 1-64 letters, digits, underscores or hyphens; anything else returns `422` and no session is created.
+Tool names must be 1-64 letters, digits, underscores or hyphens, and each name can only appear once. `type` must be
+`function`, `description` must be a string and `parameters` must be a JSON object. Anything else returns `422` and no
+session is created. Other fields in `function` are ignored.
 
 ---
 
