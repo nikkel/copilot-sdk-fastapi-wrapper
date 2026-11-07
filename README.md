@@ -166,6 +166,8 @@ ends, and the calls are returned for your app to run. Send the results back in t
 Response: `{"content": "…", "tool_calls": [{"name": "search", "arguments": {"query": "…"}}], "model": "gpt-6-luna"}`.
 An empty `tool_calls` means the model answered in `content`.
 
+Tool names must be 1-64 letters, digits, underscores or hyphens; anything else returns `422` and no session is created.
+
 ---
 
 ### `GET /models` — List available models

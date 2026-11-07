@@ -12,6 +12,7 @@ Prerequisites:
 import asyncio
 import logging
 import os
+import re
 from contextlib import asynccontextmanager
 from difflib import get_close_matches
 from time import monotonic
@@ -19,7 +20,7 @@ from typing import AsyncGenerator
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 from copilot import CopilotClient
 from copilot.tools import Tool, ToolInvocation, ToolResult
@@ -46,10 +47,23 @@ class ChatResponse(BaseModel):
     model: str
 
 
+# Tool names go into the session's tool allowlist, where the runtime reads entries like "builtin:*" as filter
+# patterns. Without ":" or "*", a caller's name can only ever name a tool, not allow Copilot's built-in ones.
+TOOL_NAME = re.compile(r"[a-zA-Z0-9_-]{1,64}")
+
+
 class ToolSpec(BaseModel):
     """A tool the CALLER implements (OpenAI/Ollama function format: {"type": "function", "function": {...}})."""
     type: str = "function"
     function: dict
+
+    @field_validator("function")
+    @classmethod
+    def _name_is_plain(cls, function: dict) -> dict:
+        name = function.get("name")
+        if not isinstance(name, str) or not TOOL_NAME.fullmatch(name):
+            raise ValueError("function.name must be 1-64 letters, digits, underscores or hyphens")
+        return function
 
 
 class AgentStepRequest(BaseModel):
