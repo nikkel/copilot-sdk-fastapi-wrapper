@@ -4,6 +4,7 @@ import asyncio
 
 import httpx
 from conftest import API_KEY
+from fastapi.testclient import TestClient
 
 import main
 
@@ -67,10 +68,11 @@ def test_model_list_works_again_after_a_failure(client, fake_copilot, monkeypatc
     assert response.json() == {"models": []}
 
 
-def test_client_not_started_still_returns_503(client, monkeypatch):
-    monkeypatch.setattr(main, "copilot_client", None)
+def test_client_not_started_still_returns_503(monkeypatch):
+    monkeypatch.setattr(main, "_api_key", API_KEY.encode())
+    unstarted = TestClient(main.app, base_url="http://localhost", headers={"Authorization": f"Bearer {API_KEY}"})
 
-    response = get_models(client)
+    response = unstarted.get("/models")
 
     assert response.status_code == 503
     assert response.json() == {"detail": "Copilot client not ready"}
