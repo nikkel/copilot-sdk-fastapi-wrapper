@@ -4,16 +4,24 @@ A FastAPI wrapper around the [github-copilot-sdk](https://pypi.org/project/githu
 
 ---
 
-## Free Models
+## Models and cost
 
-The following models have a **0× premium-request multiplier**, meaning they are unlimited at no extra cost on any paid Copilot plan (e.g. Copilot Pro ~£10/month):
+Since **1 June 2026** Copilot uses usage-based billing: there are **no free models any more**. Every chat
+request uses AI Credits from your plan's monthly allowance (1 credit = $0.01; e.g. Copilot Pro includes
+1,500 credits/month). Prices are per million tokens, see
+[Models and pricing for GitHub Copilot](https://docs.github.com/en/copilot/reference/copilot-billing/models-and-pricing).
 
-| Model ID | Best for |
-|---|---|
-| `gpt-4.1` | General-purpose coding, explanations, writing (**default**) |
-| `gpt-5-mini` | Fast answers, lightweight coding tasks, multimodal input |
+Cheapest models available to this account (checked 2026-10-15 via `GET /models`):
 
-> **Copilot Free users** still get 50 premium requests/month across all models.
+| Model ID | Input / output per 1M tokens | Notes |
+|---|---|---|
+| `gpt-6-luna` | $0.10 / $0.50 | **default**, cheapest available |
+| `mai-code-1.1-flash` | $0.20 / $1.20 | |
+| `gpt-5.6-luna` | $0.20 / $1.20 | |
+| `gpt-5-mini` | $0.25 / $2.00 | the old "free" model, now billed |
+
+A short prompt costs a tiny fraction of a credit with `gpt-6-luna`. `GET /models` lists what your plan offers;
+model availability and prices change, so check the pricing page above.
 
 ---
 
@@ -33,30 +41,33 @@ gh auth login
 
 Follow the interactive prompts. Choose **GitHub.com** → **HTTPS** → authenticate via browser.
 
-### 3 — Install the Copilot CLI extension
-
-```bash
-gh extension install github/gh-copilot
-```
-
-Verify it works:
-
-```bash
-gh copilot --version
-```
-
-### 4 — Install Python dependencies
+### 3 — Install Python dependencies
 
 Requires **Python 3.11+**.
 
+`github-copilot-sdk` 1.x downloads the Copilot CLI runtime it needs on first start (cached in
+`~/Library/Caches/github-copilot-sdk/` on macOS), so the old `gh-copilot` extension is no longer required.
+
 ```bash
+python3 -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
+Use a virtual environment: an older `github-copilot-sdk` (0.x) installed globally makes `main.py` fail with
+`ImportError: cannot import name 'PermissionDecisionReject'`.
+
 `requirements.txt` installs:
-- `github-copilot-sdk` — Python SDK that communicates with the Copilot CLI
-- `fastapi` — web framework
-- `uvicorn` — ASGI server
+- `github-copilot-sdk` 1.x (≥ 1.0.22) — Python SDK that runs and talks to the Copilot CLI runtime
+- `fastapi` (≥ 0.143.2) — web framework
+- `uvicorn[standard]` (≥ 0.54.0) — ASGI server
+- `pydantic` (≥ 2.14.1) — request/response models
+
+The client runs in the SDK's **empty mode** (data in `~/.copilot-fastapi-wrapper`, override with
+`COPILOT_WRAPPER_HOME`): no workspace/environment context or custom instructions are added to prompts.
+
+Sessions are **answer-only**: Copilot's built-in tools (shell, file edits, …) are disabled and every
+permission request is refused, so prompts containing untrusted text can't make it act on your machine.
 
 ---
 
@@ -97,7 +108,7 @@ Returns the full response once the model has finished generating.
 ```json
 {
   "prompt": "string",
-  "model": "gpt-4.1",
+  "model": "gpt-6-luna",
   "reasoning_effort": null
 }
 ```
@@ -105,15 +116,16 @@ Returns the full response once the model has finished generating.
 | Field | Type | Required | Description |
 |---|---|---|---|
 | `prompt` | string | ✅ | The message to send to Copilot |
-| `model` | string | ❌ | Model ID (default: `gpt-4.1`) |
+| `model` | string | ❌ | Model ID (default: `gpt-6-luna`) |
 | `reasoning_effort` | string \| null | ❌ | `"low"` / `"medium"` / `"high"` / `"xhigh"` — only for models that support reasoning |
+| `system` | string \| null | ❌ | Your own system prompt; **replaces** Copilot's built-in one (fewer tokens, follows your instructions) |
 
 **Response:**
 
 ```json
 {
   "response": "The assistant's full reply",
-  "model": "gpt-4.1"
+  "model": "gpt-6-luna"
 }
 ```
 
@@ -127,6 +139,26 @@ Same request body as `/chat`.
 
 ---
 
+### `POST /agent/step` — One step of an agent (native tool calling)
+
+For apps that implement their own tools (e.g. a browser agent). The tools are registered with Copilot as real
+functions, so the model uses native tool calling; **nothing is executed here**: each call is recorded, the turn
+ends, and the calls are returned for your app to run. Send the results back in the next step's `prompt`.
+
+```json
+{
+  "system": "You operate a web browser…",
+  "prompt": "User: find the phone number of …",
+  "tools": [{"type": "function", "function": {"name": "search", "description": "…", "parameters": {…}}}],
+  "model": "gpt-6-luna"
+}
+```
+
+Response: `{"content": "…", "tool_calls": [{"name": "search", "arguments": {"query": "…"}}], "model": "gpt-6-luna"}`.
+An empty `tool_calls` means the model answered in `content`.
+
+---
+
 ### `GET /models` — List available models
 
 Returns the models advertised by the connected Copilot CLI.
@@ -135,7 +167,7 @@ Returns the models advertised by the connected Copilot CLI.
 
 ```json
 {
-  "models": ["gpt-4.1", "gpt-5-mini", "claude-sonnet-4.6", "..."]
+  "models": [{"id": "gpt-6-luna", ...}, {"id": "gpt-5-mini", ...}, "..."]
 }
 ```
 
@@ -153,7 +185,7 @@ Returns the models advertised by the connected Copilot CLI.
 
 ### curl
 
-#### Basic prompt with the default free model (`gpt-4.1`)
+#### Basic prompt with the default model (`gpt-6-luna`)
 
 ```bash
 curl -s -X POST http://localhost:8000/chat \
@@ -161,7 +193,7 @@ curl -s -X POST http://localhost:8000/chat \
   -d '{"prompt": "What is a Python generator?"}'
 ```
 
-#### Explicit free model `gpt-5-mini`
+#### Choosing another model (`gpt-5-mini`)
 
 ```bash
 curl -s -X POST http://localhost:8000/chat \
@@ -172,7 +204,7 @@ curl -s -X POST http://localhost:8000/chat \
   }'
 ```
 
-#### Streaming response with `gpt-4.1`
+#### Streaming response with `gpt-6-luna`
 
 ```bash
 curl -s -N -X POST http://localhost:8000/chat/stream \
@@ -208,7 +240,7 @@ response = requests.post(
     "http://localhost:8000/chat",
     json={
         "prompt": "Give me a one-liner to reverse a string in Python",
-        "model": "gpt-4.1",
+        "model": "gpt-6-luna",
     },
 )
 print(response.json()["response"])
@@ -236,7 +268,7 @@ import requests
 
 with requests.post(
     "http://localhost:8000/chat/stream",
-    json={"prompt": "Write a haiku about Python", "model": "gpt-4.1"},
+    json={"prompt": "Write a haiku about Python", "model": "gpt-6-luna"},
     stream=True,
 ) as r:
     for line in r.iter_lines():
@@ -257,7 +289,7 @@ import asyncio
 import httpx
 
 
-async def ask(prompt: str, model: str = "gpt-4.1") -> str:
+async def ask(prompt: str, model: str = "gpt-6-luna") -> str:
     async with httpx.AsyncClient(timeout=60) as client:
         r = await client.post(
             "http://localhost:8000/chat",
@@ -299,7 +331,7 @@ const res = await fetch("http://localhost:8000/chat", {
   headers: { "Content-Type": "application/json" },
   body: JSON.stringify({
     prompt: "What is the event loop in JavaScript?",
-    model: "gpt-4.1",
+    model: "gpt-6-luna",
   }),
 });
 const data = await res.json();
@@ -340,7 +372,9 @@ while (true) {
 | Error | Fix |
 |---|---|
 | `gh: command not found` | Install GitHub CLI: `brew install gh` |
-| `gh copilot: command not found` | Run `gh extension install github/gh-copilot` |
+| First start is slow | The SDK is downloading the Copilot CLI runtime once; later starts use the cache |
 | `503 Copilot client not ready` | The server is still starting up — wait a moment and retry |
 | `ModuleNotFoundError: No module named 'copilot'` | Run `pip install -r requirements.txt` |
+| `ImportError: cannot import name 'PermissionDecisionReject'` | An old SDK is installed: activate `.venv` (or `pip install -r requirements.txt` in it) |
+| Startup fails with `IncompleteRead` while downloading the CLI runtime | Network dropped during the one-time 81 MB download: start again |
 | Server starts but returns errors | Make sure `gh auth login` has been completed and your account has an active Copilot subscription |

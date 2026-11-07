@@ -9,3 +9,6 @@ env/
 dist/
 build/
 .DS_Store
+
+# Local, uncommitted dev notes
+.*_work/
