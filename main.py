@@ -4,7 +4,7 @@ FastAPI wrapper around the github-copilot-sdk.
 Prerequisites:
   1. Install GitHub CLI:     brew install gh
   2. Authenticate:           gh auth login
-  3. Install dependencies:   pip install -r requirements.txt
+  3. Install dependencies:   pip install --require-hashes -r requirements.lock
      (github-copilot-sdk 1.x downloads the Copilot CLI runtime itself on first start)
   4. Run the server:         uvicorn main:app --reload
 """
