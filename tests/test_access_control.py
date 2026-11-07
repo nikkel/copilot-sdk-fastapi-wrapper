@@ -10,11 +10,11 @@ import sys
 from pathlib import Path
 
 import pytest
+from conftest import API_KEY
 from fastapi.testclient import TestClient
 from starlette.testclient import WebSocketDenialResponse
 
 import main
-from conftest import API_KEY
 
 BODY = {"prompt": "hi"}
 SESSION_ROUTES = [
@@ -85,9 +85,8 @@ def test_only_the_exact_health_path_is_open(anonymous, path):
 
 
 def test_websocket_without_key_is_refused(anonymous):
-    with pytest.raises(WebSocketDenialResponse) as denied:
-        with anonymous.websocket_connect("ws://localhost/not-a-route"):
-            pass
+    with pytest.raises(WebSocketDenialResponse) as denied, anonymous.websocket_connect("ws://localhost/not-a-route"):
+        pass
     assert denied.value.status_code == 401
 
 
@@ -149,9 +148,8 @@ def test_server_refuses_to_start_without_a_key(fake_copilot, monkeypatch, value)
     else:
         monkeypatch.setenv("WRAPPER_API_KEY", value)
 
-    with pytest.raises(RuntimeError, match="WRAPPER_API_KEY"):
-        with TestClient(main.app):
-            pass
+    with pytest.raises(RuntimeError, match="WRAPPER_API_KEY"), TestClient(main.app):
+        pass
 
     assert not fake_copilot.started
 
