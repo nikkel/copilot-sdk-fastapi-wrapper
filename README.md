@@ -67,7 +67,7 @@ Use a virtual environment: an older `github-copilot-sdk` (0.x) installed globall
 `ImportError: cannot import name 'PermissionDecisionReject'`.
 
 `requirements.txt` installs:
-- `github-copilot-sdk` 1.x (≥ 1.0.22) — Python SDK that runs and talks to the Copilot CLI runtime
+- `github-copilot-sdk` 1.0.22, pinned because model validation uses its experimental `rpc.models` API — Python SDK that runs and talks to the Copilot CLI runtime
 - `fastapi` (≥ 0.143.2) — web framework
 - `uvicorn[standard]` (≥ 0.54.0) — ASGI server
 - `pydantic` (≥ 2.14.1) — request/response models
