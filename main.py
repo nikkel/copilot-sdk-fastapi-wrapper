@@ -7,7 +7,7 @@ Prerequisites:
   3. Install dependencies:   pip install --require-hashes -r requirements.lock
      (github-copilot-sdk 1.x downloads the Copilot CLI runtime itself on first start)
   4. Set an API key:         export WRAPPER_API_KEY="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
-  5. Run the server:         uvicorn main:app --reload
+  5. Run the server:         uvicorn main:app --reload --timeout-graceful-shutdown 10
 """
 
 import asyncio
@@ -18,7 +18,7 @@ import os
 import re
 import secrets
 import unicodedata
-from collections.abc import AsyncGenerator, AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator, Coroutine
 from contextlib import asynccontextmanager
 from difflib import get_close_matches
 from time import monotonic
@@ -28,7 +28,7 @@ from copilot import CopilotClient
 from copilot.generated.rpc import ModelsListRequest, PermissionDecisionReject
 from copilot.session import ReasoningEffort
 from copilot.tools import Tool, ToolInvocation, ToolResult
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import AfterValidator, BaseModel, field_validator
@@ -222,6 +222,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
     await copilot_client.start()
     _reset_model_cache()
     yield
+    # uvicorn doesn't wait for the turns it cancels at its graceful shutdown limit, so finish them before stopping.
+    await asyncio.gather(*(_close_session(session, abort=True) for session in list(_open_sessions)))
     await copilot_client.stop()
 
 
@@ -370,19 +372,63 @@ async def _end_session_call(call) -> None:
         logger.warning("Could not close the Copilot session cleanly", exc_info=True)
 
 
+_open_sessions: set = set()
+_closing_sessions: set[asyncio.Task] = set()  # keeps a reference, so a running close isn't garbage collected
+
+
+async def _close_session(session, abort: bool) -> None:
+    async def close() -> None:
+        if abort:
+            await _end_session_call(session.abort)
+        await _end_session_call(session.disconnect)
+        _open_sessions.discard(session)
+
+    # In its own task, so it finishes even if this request is cancelled. On a client disconnect, Starlette cancels a
+    # stream again at every await, which would interrupt the SDK's calls here and leave the session open.
+    closing = asyncio.create_task(close())
+    _closing_sessions.add(closing)
+    closing.add_done_callback(_closing_sessions.discard)
+    await asyncio.shield(closing)
+
+
 @asynccontextmanager
 async def _turn_session(session_kwargs: dict, deadline: float) -> AsyncIterator:
-    """A session that is always closed, without letting a stalled runtime hold the caller. A timed-out turn is aborted
-    first, because closing keeps the session on the runtime and may not stop a turn that's still spending."""
+    """A session that is always closed, without letting a stalled runtime hold the caller. A turn that timed out or that
+    nobody is waiting for is aborted first, because closing keeps the session on the runtime and may not stop a turn
+    that's still spending."""
     async with asyncio.timeout_at(deadline):
         session = await copilot_client.create_session(**session_kwargs)
+    _open_sessions.add(session)
+    abort = False
     try:
         yield session
-    except TimeoutError:
-        await _end_session_call(session.abort)
+    except (TimeoutError, asyncio.CancelledError, GeneratorExit):
+        abort = True
         raise
     finally:
-        await _end_session_call(session.disconnect)
+        await _close_session(session, abort)
+
+
+async def _until_client_disconnects(request: Request, turn: Coroutine):
+    """Runs a blocking route's turn, and cancels it if the client leaves first."""
+
+    async def client_left() -> None:
+        while (await request.receive())["type"] != "http.disconnect":
+            pass
+
+    turn_task = asyncio.create_task(turn)
+    disconnect_task = asyncio.create_task(client_left())
+    try:
+        await asyncio.wait({turn_task, disconnect_task}, return_when=asyncio.FIRST_COMPLETED)
+        if turn_task.done():
+            return turn_task.result()
+        logger.info("Client disconnected, so the Copilot turn was cancelled")
+        raise HTTPException(status_code=499, detail="Client disconnected")
+    finally:
+        disconnect_task.cancel()
+        if not turn_task.done():
+            turn_task.cancel()
+            await asyncio.gather(turn_task, return_exceptions=True)
 
 
 async def _send_prompt(prompt: str, model: str, reasoning_effort: str | None, system: str | None = None) -> str:
@@ -568,24 +614,26 @@ async def _agent_step(req: AgentStepRequest) -> AgentStepResponse:
 
 
 @app.post("/agent/step", response_model=AgentStepResponse, summary="One step of an agent (native tool calling)")
-async def agent_step(req: AgentStepRequest) -> AgentStepResponse:
+async def agent_step(req: AgentStepRequest, request: Request) -> AgentStepResponse:
     """
     Send a system prompt, the conversation so far and the tools YOUR app implements. The model either calls
     tools (returned in `tool_calls`, never executed here) or answers in `content`. Run the tools yourself and
     send the next step with their results in the prompt.
     """
     await _require_known_model(req.model)
-    return await _agent_step(req)
+    return await _until_client_disconnects(request, _agent_step(req))
 
 
 @app.post("/chat", response_model=ChatResponse, summary="Send a prompt (blocking)")
-async def chat(req: PromptRequest) -> ChatResponse:
+async def chat(req: PromptRequest, request: Request) -> ChatResponse:
     """
     Send a prompt to GitHub Copilot and receive the complete response.
     Blocks until the model finishes generating.
     """
     await _require_known_model(req.model)
-    response = await _send_prompt(req.prompt, req.model, req.reasoning_effort, req.system)
+    response = await _until_client_disconnects(
+        request, _send_prompt(req.prompt, req.model, req.reasoning_effort, req.system)
+    )
     return ChatResponse(response=response, model=req.model)
 
 

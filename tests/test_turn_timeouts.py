@@ -232,7 +232,7 @@ def test_limit_covers_the_whole_stream_not_each_chunk(client, fake_copilot):
     assert "[DONE]" not in response.text
 
 
-def test_stream_closed_by_the_client_closes_the_session_without_an_abort(client, fake_copilot):
+def test_stream_closed_by_the_client_aborts_the_turn_and_closes_the_session(client, fake_copilot):
     fake_copilot.turn = lambda session: session.emit(event("assistant.message_delta", delta_content="part"))
 
     async def read_one_chunk_then_leave() -> str:
@@ -242,7 +242,7 @@ def test_stream_closed_by_the_client_closes_the_session_without_an_abort(client,
         return first
 
     assert client.portal.call(read_one_chunk_then_leave) == 'data: {"delta": "part"}\n\n'
-    assert fake_copilot.turns_aborted == 0
+    assert fake_copilot.turns_aborted == 1
     assert fake_copilot.sessions_closed == 1
 
 
